@@ -15,12 +15,12 @@ point `OVC_FFMPEG` / `OVC_FFPROBE` at your own.
     npm install
     npm start                 # http://127.0.0.1:4455, opens your browser
 
-or without cloning:
+To open the UI with a file already loaded:
 
-    npx openvideochamp
-    npx openvideochamp some-clip.mp4     # opens the UI with that file loaded
+    npm start -- some-clip.mp4
 
-Options: `--port 4455` (or `OVC_PORT`), `--no-open`.
+Options: `--port 4455` (or `OVC_PORT`), `--no-open`. (`npx openvideochamp`
+will work the same way once the package is published to npm.)
 
 ## CLI
 
