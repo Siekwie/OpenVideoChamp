@@ -100,6 +100,7 @@ export function planExport(source, input, { encoders = ['libx264'], defaultOutpu
     if (!encoders.includes(encoder)) fail(`Encoder not available: ${encoder}`);
     const hardware = encoder !== 'libx264';
     plan.encoder = encoder;
+    let capped = false;
 
     if (targetBytes) {
       // 4 % mux overhead/safety; hardware rate control is sloppier, so another 4 %.
@@ -107,6 +108,11 @@ export function planExport(source, input, { encoders = ['libx264'], defaultOutpu
       const totalKbps = (budget * 8) / duration / 1000;
       plan.audioKbps = muted ? 0 : totalKbps >= 1200 ? 128 : totalKbps >= 600 ? 96 : 64;
       plan.videoKbps = Math.floor(totalKbps - plan.audioKbps);
+      // Don't inflate short clips past their source: more bits than ~1.5x the source bitrate buy nothing.
+      if (source.bitrate > 0 && plan.videoKbps > source.bitrate * 1.5) {
+        plan.videoKbps = Math.round(source.bitrate * 1.5);
+        capped = true;
+      }
       if (plan.videoKbps < 32) fail('Target size is too small for this duration');
       if (plan.videoKbps < 150) warnings.push('Very low bitrate for this length; expect heavy quality loss.');
       plan.twoPass = !hardware;
@@ -128,13 +134,13 @@ export function planExport(source, input, { encoders = ['libx264'], defaultOutpu
 
     let height;
     if (typeof req.resolution === 'number') height = req.resolution;
-    else if (req.resolution === 'source' || !targetBytes) height = steamAuto ? Math.min(srcH, 1080) : srcH;
+    else if (req.resolution === 'source' || !targetBytes || capped) height = steamAuto ? Math.min(srcH, 1080) : srcH;
     else {
       const candidates = [...new Set([srcH, 1080, 720, 480, 360].filter((h) => h <= srcH))].sort((a, b) => b - a);
       height = candidates.find((h) => bpp(dimsFor(h), fps) >= 0.05) ?? candidates.at(-1);
     }
     const dims = dimsFor(height);
-    if (targetBytes && req.fps === 'auto' && source.fps > 30 && bpp(dims, fps) < 0.05) fps = 30;
+    if (targetBytes && !capped && req.fps === 'auto' && source.fps > 30 && bpp(dims, fps) < 0.05) fps = 30;
     plan.width = dims.width;
     plan.height = dims.height;
     plan.fps = fps;

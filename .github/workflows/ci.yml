@@ -11,5 +11,5 @@ jobs:
         with:
           node-version: 22
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
-      - run: npm install --no-optional
+      - run: npm ci --omit=optional
       - run: npm test
