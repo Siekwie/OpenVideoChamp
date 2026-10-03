@@ -137,13 +137,22 @@ test('custom targetMB', () => {
   assert.throws(() => planExport(src(), req({ preset: 'custom' }), opts), /targetMB/);
 });
 
+test('explicit outputPath never overwrites and may not be the source', () => {
+  const taken = new Set(['/videos/final.mp4']);
+  const p = planExport(src(), req({ outputPath: '/videos/final.mp4' }), { ...opts, exists: (f) => taken.has(f) });
+  assert.equal(p.outputPath, '/videos/final-2.mp4');
+  assert.throws(() => planExport(src(), req({ outputPath: '/videos/clip.mp4' }), opts), PlanError);
+  assert.throws(() => planExport(src(), req({ resolution: 1 }), opts), PlanError);
+  assert.throws(() => planExport(src(), req({ fps: 0.001 }), opts), PlanError);
+});
+
 test('non-clobber naming, upload directory and explicit outputPath', () => {
   const taken = new Set(['/videos/clip_10MB.mp4', '/videos/clip_10MB-2.mp4']);
   const p = planExport(src(), req(), { ...opts, exists: (f) => taken.has(f) });
   assert.equal(p.outputPath, '/videos/clip_10MB-3.mp4');
   const up = planExport(src({ uploaded: true, path: '/tmp/x/clip.mp4' }), req(), opts);
   assert.equal(up.outputPath, '/out/clip_10MB.mp4');
-  const explicit = planExport(src(), req({ outputPath: '/elsewhere/final.mp4' }), { ...opts, exists: () => true });
+  const explicit = planExport(src(), req({ outputPath: '/elsewhere/final.mp4' }), opts);
   assert.equal(explicit.outputPath, '/elsewhere/final.mp4');
 });
 

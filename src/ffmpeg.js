@@ -105,13 +105,18 @@ function parseTimes(stdout, pick) {
 // Keyframe timestamps of the first video stream, ascending.
 export async function keyframes(ffprobe, file) {
   const common = ['-v', 'error', '-select_streams', 'v:0'];
+  // Packet flags come from the container index (no decoding), which is also what -ss + -c copy seeks by.
   try {
-    const { stdout } = await run(ffprobe, [...common, '-skip_frame', 'nokey', '-show_entries', 'frame=pts_time', '-of', 'csv=p=0', file], { timeout: 30_000 });
-    const times = parseTimes(stdout, (f) => Number(f[0]));
+    const { stdout } = await run(ffprobe, [...common, '-show_entries', 'packet=pts_time,dts_time,flags', '-of', 'csv=p=0', file], { timeout: 60_000 });
+    const times = parseTimes(stdout, (f) => (f[2]?.includes('K') ? Number(f[0]) || Number(f[1]) : NaN));
     if (times.length) return times;
-  } catch { /* slow or unsupported: fall through to the packet scan */ }
-  const { stdout } = await run(ffprobe, [...common, '-show_entries', 'packet=pts_time,dts_time,flags', '-of', 'csv=p=0', file]);
-  return parseTimes(stdout, (f) => (f[2]?.includes('K') ? Number(f[0]) || Number(f[1]) : NaN));
+  } catch { /* fall through */ }
+  try {
+    const { stdout } = await run(ffprobe, [...common, '-skip_frame', 'nokey', '-show_entries', 'frame=pts_time', '-of', 'csv=p=0', file], { timeout: 60_000 });
+    return parseTimes(stdout, (f) => Number(f[0]));
+  } catch {
+    return [];
+  }
 }
 
 async function verifyEncoder(ffmpeg, name) {

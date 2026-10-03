@@ -142,6 +142,9 @@ a terminal status, then closes.
 - Size target: `budget = targetBytes * 0.96` (mux overhead + safety).
   `totalKbps = budget*8/duration/1000`. audioKbps = 128 if totalKbps ≥ 1200,
   96 if ≥ 600, else 64 (0 if muted / no audio). `videoKbps = totalKbps - audioKbps`.
+  If that is more than 1.5× the source's overall bitrate, `videoKbps` is capped there
+  (more bits than the source has buy nothing; the output then lands well under the
+  target) and auto resolution/fps stay at the source values.
   libx264 two-pass with `-b:v videoKbps -maxrate videoKbps*1.5 -bufsize videoKbps*3`.
   Hardware encoders: single pass, `-b:v -maxrate -bufsize`, extra 4 % margin.
 - `resolution:"auto"` with a size target: candidates = source height, 1080, 720, 480, 360
@@ -152,4 +155,12 @@ a terminal status, then closes.
 - Warnings: videoKbps < 150 → heavy quality loss; start snapped by more than 0.5 s in copy mode → say how far.
 - Output name: `<name>_cut.mp4`, `<name>_10MB.mp4`, `<name>_steam.mp4`; never
   overwrite — append `-2`, `-3`, ….  Directory: next to the source when the source
-  is a real file; `defaultOutputDir` for uploads. `outputPath` in the request overrides.
+  is a real file; `defaultOutputDir` for uploads. `outputPath` in the request overrides
+  the name, but is subject to the same no-overwrite rule and must not be the source file.
+- ffmpeg writes to `<name>.part<ext>` and the file is renamed on success, so a failed
+  or cancelled job never leaves a half-written file under the final name.
+- In copy mode `videoKbps` is `null` and `audioKbps` is `null` (audio copied) or `0` (muted).
+- `resolution` accepts any integer height 144–4320 (clamped to the source, never
+  upscaled); `fps` any value 1–240 (never above the source).
+- Non-GET requests carrying an `Origin` header from a different origin get 403.
+  Scripts and curl send no `Origin` and are unaffected.
