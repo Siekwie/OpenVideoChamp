@@ -4,6 +4,9 @@ import { spawn } from 'node:child_process';
 import { onPath } from './ffmpeg.js';
 
 const VIDEO_EXTS = ['mp4', 'mkv', 'mov', 'webm', 'avi', 'm4v', 'ts', 'mts', 'wmv', 'flv', 'mpg', 'mpeg'];
+const IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'webp', 'bmp'];
+const AUDIO_EXTS = ['mp3', 'wav', 'ogg', 'oga', 'flac', 'm4a', 'aac', 'opus'];
+const MEDIA_EXTS = [...VIDEO_EXTS, ...IMAGE_EXTS, ...AUDIO_EXTS];
 
 // Runs a command to completion. `missing` is true when the executable does not exist.
 function exec(cmd, args) {
@@ -31,14 +34,15 @@ export function dialogAvailable() {
 }
 
 export async function openFileDialog() {
-  const globs = VIDEO_EXTS.map((e) => `*.${e}`).join(' ');
+  const globs = MEDIA_EXTS.map((e) => `*.${e}`).join(' ');
+  const win = (exts) => exts.map((e) => `*.${e}`).join(';');
   if (process.platform === 'win32') {
     const script = [
       '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8', // else non-ASCII paths arrive in the OEM code page
       'Add-Type -AssemblyName System.Windows.Forms',
       '$d = New-Object System.Windows.Forms.OpenFileDialog',
-      `$d.Filter = 'Video files|${VIDEO_EXTS.map((e) => `*.${e}`).join(';')}|All files|*.*'`,
-      "$d.Title = 'Open video'",
+      `$d.Filter = 'Media files|${win(MEDIA_EXTS)}|Video|${win(VIDEO_EXTS)}|Images|${win(IMAGE_EXTS)}|Audio|${win(AUDIO_EXTS)}|All files|*.*'`,
+      "$d.Title = 'Open media'",
       '$top = New-Object System.Windows.Forms.Form -Property @{ TopMost = $true; ShowInTaskbar = $false }',
       'if ($d.ShowDialog($top) -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $d.FileName } else { exit 2 }',
     ].join('; ');
@@ -48,13 +52,13 @@ export async function openFileDialog() {
     return r.code === 2 ? { cancelled: true } : { unsupported: true };
   }
   if (process.platform === 'darwin') {
-    const r = await exec('osascript', ['-e', 'POSIX path of (choose file of type {"public.movie"} with prompt "Open video")']);
+    const r = await exec('osascript', ['-e', 'POSIX path of (choose file of type {"public.movie", "public.image", "public.audio"} with prompt "Open media")']);
     if (r.missing) return { unsupported: true };
     return r.code === 0 && r.stdout.trim() ? { path: r.stdout.trim() } : { cancelled: true };
   }
-  const zenity = await exec('zenity', ['--file-selection', '--title=Open video', `--file-filter=Video files | ${globs}`, '--file-filter=All files | *']);
+  const zenity = await exec('zenity', ['--file-selection', '--title=Open media', `--file-filter=Media files | ${globs}`, '--file-filter=All files | *']);
   if (!zenity.missing) return zenity.code === 0 && zenity.stdout.trim() ? { path: zenity.stdout.trim() } : { cancelled: true };
-  const kdialog = await exec('kdialog', ['--title', 'Open video', '--getopenfilename', '.', `Video files (${globs})`]);
+  const kdialog = await exec('kdialog', ['--title', 'Open media', '--getopenfilename', '.', `Media files (${globs})`]);
   if (!kdialog.missing) return kdialog.code === 0 && kdialog.stdout.trim() ? { path: kdialog.stdout.trim() } : { cancelled: true };
   return { unsupported: true };
 }

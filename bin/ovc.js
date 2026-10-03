@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { locate, detectEncoders, probe, keyframes } from '../src/ffmpeg.js';
+import { locate, detectCapabilities, probe, keyframes } from '../src/ffmpeg.js';
 import { createServer, DEFAULT_OUTPUT_DIR, VERSION } from '../src/server.js';
 import { Jobs, isTerminal } from '../src/jobs.js';
 import { planExport } from '../src/plan.js';
@@ -81,8 +81,8 @@ function shutdownOn(jobs, server) {
 
 function serve(positional, opts) {
   const { ffmpeg, ffprobe } = locate();
-  const encoderState = detectEncoders(ffmpeg);
-  const { server, jobs } = createServer({ ffmpeg, ffprobe, encoderState, tmpDir });
+  const capabilities = detectCapabilities(ffmpeg);
+  const { server, jobs } = createServer({ ffmpeg, ffprobe, capabilities, tmpDir });
   shutdownOn(jobs, server);
   const port = Number(opts.port ?? process.env.OVC_PORT ?? 4455);
   server.on('error', (e) => die(`Cannot listen on 127.0.0.1:${port}: ${e.message}`));
