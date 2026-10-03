@@ -1,0 +1,28 @@
+{
+  "name": "openvideochamp",
+  "version": "0.1.0",
+  "description": "Fast, simple video cutting and size-targeted compression (Discord, Steam) with a local API.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "ovc": "bin/ovc.js"
+  },
+  "scripts": {
+    "start": "node bin/ovc.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "bin",
+    "src",
+    "public",
+    "docs",
+    "README.md"
+  ],
+  "optionalDependencies": {
+    "ffmpeg-static": "^5.2.0",
+    "ffprobe-static": "^3.1.0"
+  }
+}
