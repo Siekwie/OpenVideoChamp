@@ -17,9 +17,9 @@ function exec(cmd, args) {
   });
 }
 
-function fireAndForget(cmd, args) {
+function fireAndForget(cmd, args, extra = {}) {
   return new Promise((resolve) => {
-    const proc = spawn(cmd, args, { stdio: 'ignore', detached: true, windowsHide: true });
+    const proc = spawn(cmd, args, { stdio: 'ignore', detached: true, windowsHide: true, ...extra });
     proc.on('error', () => resolve(false));
     proc.on('spawn', () => { proc.unref(); resolve(true); });
   });
@@ -34,16 +34,18 @@ export async function openFileDialog() {
   const globs = VIDEO_EXTS.map((e) => `*.${e}`).join(' ');
   if (process.platform === 'win32') {
     const script = [
+      '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8', // else non-ASCII paths arrive in the OEM code page
       'Add-Type -AssemblyName System.Windows.Forms',
       '$d = New-Object System.Windows.Forms.OpenFileDialog',
       `$d.Filter = 'Video files|${VIDEO_EXTS.map((e) => `*.${e}`).join(';')}|All files|*.*'`,
       "$d.Title = 'Open video'",
       '$top = New-Object System.Windows.Forms.Form -Property @{ TopMost = $true; ShowInTaskbar = $false }',
-      'if ($d.ShowDialog($top) -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $d.FileName } else { exit 1 }',
+      'if ($d.ShowDialog($top) -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $d.FileName } else { exit 2 }',
     ].join('; ');
     const r = await exec('powershell', ['-NoProfile', '-NonInteractive', '-STA', '-Command', script]);
-    if (r.missing) return { unsupported: true };
-    return r.code === 0 && r.stdout.trim() ? { path: r.stdout.trim() } : { cancelled: true };
+    if (r.code === 0 && r.stdout.trim()) return { path: r.stdout.trim() };
+    // exit 2 is our own "cancelled"; anything else (missing, Constrained Language Mode, ...) means no dialog.
+    return r.code === 2 ? { cancelled: true } : { unsupported: true };
   }
   if (process.platform === 'darwin') {
     const r = await exec('osascript', ['-e', 'POSIX path of (choose file of type {"public.movie"} with prompt "Open video")']);
@@ -59,7 +61,8 @@ export async function openFileDialog() {
 
 // Opens the file's folder in the OS file manager, selecting the file where the platform allows it.
 export async function reveal(file) {
-  if (process.platform === 'win32') return fireAndForget('explorer', [`/select,${file}`]);
+  // Explorer wants /select,"path" verbatim; Node's default quoting would wrap the whole token instead.
+  if (process.platform === 'win32') return fireAndForget('explorer', [`/select,"${file}"`], { windowsVerbatimArguments: true });
   if (process.platform === 'darwin') return fireAndForget('open', ['-R', file]);
   const r = await exec('dbus-send', ['--session', '--print-reply', '--dest=org.freedesktop.FileManager1',
     '/org/freedesktop/FileManager1', 'org.freedesktop.FileManager1.ShowItems',

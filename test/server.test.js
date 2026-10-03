@@ -198,15 +198,33 @@ test('PUT /api/upload (chunked body) registers an uploaded source', async () => 
   assert.ok(plan.data.outputPath.endsWith(path.join('OpenVideoChamp', 'my clip_steam.mp4')), plan.data.outputPath);
 });
 
-test('cancelling a running job leaves no output file', async () => {
-  const { data } = await api('POST', '/api/export', { sourceId, start: 0, end: 12, preset: 'custom', targetMB: 5, speed: 'best' });
+test('cancelling a running job leaves no output or .part file and never touches an existing file', async () => {
+  const outputPath = path.join(WORK, 'precious.mp4');
+  fs.writeFileSync(outputPath, 'keep me');
+  const { data } = await api('POST', '/api/export', { sourceId, start: 0, end: 12, preset: 'custom', targetMB: 5, speed: 'best', outputPath });
   const running = await waitForJob(data.jobId, (j) => j.status !== 'queued');
   assert.equal(running.status, 'running');
+  assert.notEqual(running.outputPath, outputPath, 'explicit path must not overwrite');
   const { status, data: cancelled } = await api('POST', `/api/jobs/${data.jobId}/cancel`);
   assert.equal(status, 200);
   assert.equal(cancelled.status, 'cancelled');
   assert.ok(!fs.existsSync(cancelled.outputPath));
+  assert.ok(!fs.readdirSync(WORK).some((f) => f.includes('.part')), 'no .part leftovers');
+  assert.equal(fs.readFileSync(outputPath, 'utf8'), 'keep me');
   assert.equal((await api('GET', `/api/jobs/${data.jobId}/download`)).status, 409);
+});
+
+test('cross-origin POSTs are refused, same-origin and no-origin accepted; bad URLs do not crash', async () => {
+  const post = (headers) => fetch(base + '/api/plan', { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify({ sourceId, start: 0, end: 5 }) });
+  assert.equal((await post({ origin: 'http://evil.example' })).status, 403);
+  assert.equal((await post({ 'sec-fetch-site': 'cross-site' })).status, 403);
+  assert.equal((await post({ origin: 'http://' + new URL(base).host })).status, 200);
+  assert.equal((await post({})).status, 200);
+  assert.equal((await api('POST', '/api/open', null)).status, 400);
+  assert.equal((await fetch(base + '/%E0%A4%A')).status, 404);
+  const txt = path.join(WORK, 'not-a-video.mp4');
+  fs.writeFileSync(txt, 'hello');
+  assert.equal((await api('POST', '/api/open', { path: txt })).status, 400);
 });
 
 test('GET /api/docs serves markdown; unknown routes are JSON 404s', async () => {

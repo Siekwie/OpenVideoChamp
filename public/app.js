@@ -114,8 +114,10 @@ function showLoadError(msg) {
 }
 
 function loadMedia({ url, name, size, source, objectUrl }) {
+  if (jobActive() && state.job.id) fetch(`/api/jobs/${state.job.id}/cancel`, { method: 'POST' }).catch(() => {});
   stopJob();
   state.job = null;
+  state.exportWhenPlanned = false;
   if (state.objectUrl && state.objectUrl !== objectUrl) URL.revokeObjectURL(state.objectUrl);
   if (state.upload) { state.upload.abort(); state.upload = null; }
   Object.assign(state, {

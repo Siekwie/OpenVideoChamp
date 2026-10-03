@@ -53,9 +53,11 @@ export function normalizeRequest(input = {}) {
     if (!allowed.includes(r[key])) fail(`Invalid ${key}: ${JSON.stringify(input[key])}`);
   }
   if (!Number.isFinite(r.start) || !Number.isFinite(r.end)) fail('start and end must be numbers (seconds)');
-  for (const key of ['resolution', 'fps']) {
-    const v = r[key];
-    if (v !== 'auto' && v !== 'source' && !(Number.isFinite(v) && v > 0)) fail(`Invalid ${key}: ${JSON.stringify(input[key])}`);
+  if (r.resolution !== 'auto' && r.resolution !== 'source' && !(Number.isInteger(r.resolution) && r.resolution >= 144 && r.resolution <= 4320)) {
+    fail(`Invalid resolution: ${JSON.stringify(input.resolution)}`);
+  }
+  if (r.fps !== 'auto' && r.fps !== 'source' && !(Number.isFinite(r.fps) && r.fps >= 1 && r.fps <= 240)) {
+    fail(`Invalid fps: ${JSON.stringify(input.fps)}`);
   }
   if (r.preset === 'custom' && !(r.targetMB > 0)) fail('targetMB must be a positive number for the custom preset');
   return r;
@@ -158,15 +160,21 @@ export function planExport(source, input, { encoders = ['libx264'], defaultOutpu
     }
   }
 
+  let dir, base;
   if (req.outputPath) {
-    plan.outputPath = path.resolve(req.outputPath);
+    const p = path.resolve(req.outputPath);
+    if (p === path.resolve(source.path)) fail('Output path must differ from the source file');
+    dir = path.dirname(p);
+    ext = path.extname(p) || ext;
+    base = path.basename(p, path.extname(p));
   } else {
     const tag = targetBytes ? `${targetBytes / 1e6}MB` : req.preset === 'steam' ? 'steam' : 'cut';
-    const dir = source.uploaded ? defaultOutputDir : path.dirname(source.path);
-    const base = `${path.basename(source.name, path.extname(source.name))}_${tag}`;
-    plan.outputPath = path.join(dir, base + ext);
-    for (let n = 2; exists(plan.outputPath); n++) plan.outputPath = path.join(dir, `${base}-${n}${ext}`);
+    dir = source.uploaded ? defaultOutputDir : path.dirname(source.path);
+    base = `${path.basename(source.name, path.extname(source.name))}_${tag}`;
   }
+  // Never overwrite anything, explicit path or not.
+  plan.outputPath = path.join(dir, base + ext);
+  for (let n = 2; exists(plan.outputPath); n++) plan.outputPath = path.join(dir, `${base}-${n}${ext}`);
   return plan;
 }
 

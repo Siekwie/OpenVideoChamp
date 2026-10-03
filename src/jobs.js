@@ -21,11 +21,15 @@ export class Jobs extends EventEmitter {
 
   create(plan, source, request) {
     let id;
-    do id = `j_${randomBytes(2).toString('hex')}`; while (this.jobs.has(id));
+    do id = `j_${randomBytes(4).toString('hex')}`; while (this.jobs.has(id));
+    // ffmpeg writes to <name>.part<ext>; it is renamed to the final name only on success, so a
+    // failed or cancelled job can never clobber or delete a file it did not fully produce.
+    const ext = path.extname(plan.outputPath);
+    const tempPath = plan.outputPath.slice(0, -ext.length) + '.part' + ext;
     const job = {
       id, status: 'queued', pass: 0, passes: plan.twoPass ? 2 : 1, progress: 0, fps: null, speed: null,
-      etaSeconds: null, plan, outputPath: plan.outputPath, outputBytes: null, error: null, log: [],
-      args: buildArgs(plan, source, request, { passLogFile: path.join(this.tmpDir, `pass-${id}`) }),
+      etaSeconds: null, plan, outputPath: plan.outputPath, tempPath, outputBytes: null, error: null, log: [],
+      args: buildArgs({ ...plan, outputPath: tempPath }, source, request, { passLogFile: path.join(this.tmpDir, `pass-${id}`) }),
       passProgress: 0, proc: null, cancelled: false, startedAt: 0, lastEmit: 0, timer: null,
     };
     job.finished = new Promise((resolve) => { job.resolveFinished = resolve; });
@@ -154,13 +158,14 @@ export class Jobs extends EventEmitter {
       job.progress = 1;
       job.etaSeconds = 0;
       try {
+        fs.renameSync(job.tempPath, job.outputPath);
         job.outputBytes = fs.statSync(job.outputPath).size;
-      } catch {
+      } catch (e) {
         job.status = 'error';
-        job.error = 'ffmpeg finished but the output file is missing';
+        job.error = `ffmpeg finished but the output could not be written: ${e.message}`;
       }
     } else {
-      fs.rmSync(job.outputPath, { force: true });
+      try { fs.rmSync(job.tempPath, { force: true }); } catch { /* locked by a scanner; harmless leftover */ }
     }
     // libx264 writes <passlog>-0.log and -0.log.mbtree next to the pass log base.
     try {

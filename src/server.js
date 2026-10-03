@@ -45,10 +45,19 @@ function sendJson(res, status, body) {
   res.end(JSON.stringify(body));
 }
 
+// pipeline() (not .pipe()) so an aborted request destroys the read stream and releases its fd.
 function sendFile(res, file, type, headers = {}) {
   const { size } = fs.statSync(file);
   res.writeHead(200, { 'Content-Type': type, 'Content-Length': size, ...headers });
-  fs.createReadStream(file).pipe(res);
+  pipeline(fs.createReadStream(file), res).catch(() => {});
+}
+
+// A browser page from another origin can POST to loopback blind; refuse it. curl and scripts send no Origin.
+function sameOrigin(req) {
+  if (req.headers['sec-fetch-site'] === 'cross-site') return false;
+  const origin = req.headers.origin;
+  if (!origin) return true;
+  try { return new URL(origin).host === req.headers.host; } catch { return false; }
 }
 
 export function createServer({ ffmpeg, ffprobe, encoderState, tmpDir, publicDir = path.join(ROOT, 'public') }) {
@@ -73,8 +82,10 @@ export function createServer({ ffmpeg, ffprobe, encoderState, tmpDir, publicDir 
     file = path.resolve(file);
     try { if (!fs.statSync(file).isFile()) throw new Error(); } catch { throw new HttpError(404, `File not found: ${file}`); }
     let id;
-    do id = `s_${randomBytes(2).toString('hex')}`; while (sources.has(id));
-    const src = { id, name, path: file, uploaded, ...(await probe(ffprobe, file)) };
+    do id = `s_${randomBytes(4).toString('hex')}`; while (sources.has(id));
+    let info;
+    try { info = await probe(ffprobe, file); } catch (e) { throw new HttpError(e.status || 400, e.status ? e.message : `Not a readable video file: ${e.message}`); }
+    const src = { id, name, path: file, uploaded, ...info };
     sources.set(id, src);
     // Keyframes are needed for copy-mode plans; compute once, early, in the background.
     keyframeCache.set(id, probeKeyframes(ffprobe, file).catch(() => []));
@@ -82,25 +93,32 @@ export function createServer({ ffmpeg, ffprobe, encoderState, tmpDir, publicDir 
   }
 
   async function plan(body) {
-    const src = source(String(body?.sourceId ?? ''));
+    if (!body || typeof body !== 'object') throw new HttpError(400, 'Expected a JSON object');
+    const src = source(String(body.sourceId ?? ''));
+    // Only a stream-copy plan needs keyframes; don't make every plan wait for the scan of a huge file.
+    const copy = (body.preset ?? 'cut') === 'cut' && (body.cut ?? 'fast') === 'fast';
     return planExport(src, body, {
       encoders: encoderState.encoders,
       defaultOutputDir: DEFAULT_OUTPUT_DIR,
       exists: (p) => fs.existsSync(p) || jobs.reserved(p),
-      keyframes: await keyframeCache.get(src.id),
+      keyframes: copy ? await keyframeCache.get(src.id) : [],
     });
   }
 
   const routes = [
-    ['GET', /^\/api\/info$/, async () => ({
-      version: VERSION, platform: process.platform,
-      ffmpeg: { path: ffmpeg, version: await versionPromise },
-      encoders: encoderState.encoders, dialog: dialogAvailable(), defaultOutputDir: DEFAULT_OUTPUT_DIR,
-    })],
+    ['GET', /^\/api\/info$/, async () => {
+      // Give hardware-encoder verification a moment so the first page load sees the full list.
+      await Promise.race([encoderState.ready, new Promise((r) => setTimeout(r, 3000))]);
+      return {
+        version: VERSION, platform: process.platform,
+        ffmpeg: { path: ffmpeg, version: await versionPromise },
+        encoders: encoderState.encoders, dialog: dialogAvailable(), defaultOutputDir: DEFAULT_OUTPUT_DIR,
+      };
+    }],
     ['GET', /^\/api\/docs$/, (req, res) => sendFile(res, path.join(ROOT, 'docs', 'API.md'), 'text/markdown; charset=utf-8')],
     ['POST', /^\/api\/open$/, async (req) => {
       const body = await readJson(req);
-      if (typeof body.path !== 'string' || !body.path) throw new HttpError(400, 'Missing "path"');
+      if (typeof body?.path !== 'string' || !body.path) throw new HttpError(400, 'Missing "path"');
       return register(body.path);
     }],
     ['POST', /^\/api\/open\/dialog$/, async () => {
@@ -108,7 +126,8 @@ export function createServer({ ffmpeg, ffprobe, encoderState, tmpDir, publicDir 
       return r.path ? register(r.path) : r;
     }],
     ['PUT', /^\/api\/upload$/, async (req, res, url) => {
-      const name = path.basename(url.searchParams.get('name') || 'upload.mp4').replace(/[\\/:*?"<>|\0]/g, '_');
+      let name = path.basename(url.searchParams.get('name') || '').replace(/[\\/:*?"<>|\0]/g, '_');
+      if (!name || name === '.' || name === '..') name = 'upload.mp4';
       const dir = fs.mkdtempSync(path.join(tmpDir, 'u-'));
       const file = path.join(dir, name);
       await pipeline(req, fs.createWriteStream(file));
@@ -131,7 +150,7 @@ export function createServer({ ffmpeg, ffprobe, encoderState, tmpDir, publicDir 
         return;
       }
       res.writeHead(206, { 'Content-Type': type, 'Content-Length': end - start + 1, 'Accept-Ranges': 'bytes', 'Content-Range': `bytes ${start}-${end}/${size}` });
-      fs.createReadStream(src.path, { start, end }).pipe(res);
+      pipeline(fs.createReadStream(src.path, { start, end }), res).catch(() => {});
     }],
     ['POST', /^\/api\/plan$/, async (req) => plan(await readJson(req))],
     ['POST', /^\/api\/export$/, async (req) => {
@@ -170,19 +189,22 @@ export function createServer({ ffmpeg, ffprobe, encoderState, tmpDir, publicDir 
   ];
 
   function serveStatic(res, pathname) {
-    const rel = pathname === '/' ? 'index.html' : decodeURIComponent(pathname.slice(1));
+    let rel;
+    try { rel = pathname === '/' ? 'index.html' : decodeURIComponent(pathname.slice(1)); } catch { throw new HttpError(404, 'Not found'); }
     const file = path.resolve(publicDir, rel);
     if (!file.startsWith(publicDir + path.sep) || !fs.existsSync(file) || !fs.statSync(file).isFile()) throw new HttpError(404, 'Not found');
     sendFile(res, file, STATIC_TYPES[path.extname(file).toLowerCase()] || 'application/octet-stream', { 'Cache-Control': 'no-cache' });
   }
 
   const server = http.createServer(async (req, res) => {
-    const url = new URL(req.url, 'http://127.0.0.1');
     try {
+      let url;
+      try { url = new URL(req.url, 'http://127.0.0.1'); } catch { throw new HttpError(400, 'Bad request'); }
       if (!url.pathname.startsWith('/api/')) {
         if (req.method !== 'GET' && req.method !== 'HEAD') throw new HttpError(405, 'Method not allowed');
         return serveStatic(res, url.pathname);
       }
+      if (req.method !== 'GET' && req.method !== 'HEAD' && !sameOrigin(req)) throw new HttpError(403, 'Cross-origin requests are not allowed');
       for (const [method, re, handler] of routes) {
         const m = re.exec(url.pathname);
         if (!m) continue;
