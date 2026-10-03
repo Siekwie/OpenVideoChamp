@@ -71,7 +71,7 @@ after(() => proc?.kill());
 test('GET /api/info', async () => {
   const { status, data } = await api('GET', '/api/info');
   assert.equal(status, 200);
-  assert.equal(data.version, '0.1.0');
+  assert.equal(data.version, JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version);
   assert.equal(data.platform, process.platform);
   assert.ok(data.ffmpeg.path);
   assert.ok(Array.isArray(data.encoders));
@@ -323,8 +323,8 @@ test('export: a transition longer than its clip is rejected before anything runs
   assert.match(data.error, /too short/);
 });
 
-test('preview: draft render lands in the temp dir and streams back with Range support', async () => {
-  const { status, data } = await api('POST', '/api/export', sequence({ preview: true, normalize: false }));
+test('preview: draft render lands in the temp dir and streams back with Range support; music-only mix', async () => {
+  const { status, data } = await api('POST', '/api/export', sequence({ preview: true, normalize: false, music: { sourceId: musicId, mode: 'replace', loop: false, volume: 1 } }));
   assert.equal(status, 200, JSON.stringify(data));
   const job = await waitForJob(data.jobId, (j) => ['done', 'error', 'cancelled'].includes(j.status), 90_000);
   assert.equal(job.status, 'done', job.log);
@@ -334,6 +334,7 @@ test('preview: draft render lands in the temp dir and streams back with Range su
   assert.equal(job.plan.targetBytes, null);
   assert.ok(!job.outputPath.startsWith(WORK), `preview must not be written next to the source: ${job.outputPath}`);
   assert.ok(Math.abs(duration(job.outputPath) - 7) <= 0.15, `duration ${duration(job.outputPath)}`);
+  assert.ok(probeField(job.outputPath, 'stream=codec_type').includes('audio'), 'music-only output still has an audio track');
   const res = await fetch(`${base}/api/jobs/${data.jobId}/stream`, { headers: { range: 'bytes=0-99' } });
   assert.equal(res.status, 206);
   assert.equal(res.headers.get('content-type'), 'video/mp4');

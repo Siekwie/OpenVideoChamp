@@ -379,13 +379,15 @@ export function buildFilterGraph(plan, seq, { withAudio = true } = {}) {
   const T = seq.total;
   const parts = [];
   const vLabels = [], aLabels = [];
+  // "Music only" drops the clip audio entirely; building it would leave an unconnected filter output.
+  const clipAudio = withAudio && !(seq.music && seq.music.mode === 'replace');
 
   seq.clips.forEach((c, k) => {
     const d = f3(c.duration);
     const video = ['setpts=PTS-STARTPTS', `fps=${f3(F)}`, ...fitFilters(c.source, W, H), 'setsar=1', 'format=yuv420p', 'tpad=stop=-1', `trim=duration=${d}`];
     parts.push(`[${k}:v]${video.join(',')}[v${k}]`);
     vLabels.push(`[v${k}]`);
-    if (!withAudio) return;
+    if (!clipAudio) return;
     if (c.audible) {
       const vol = c.volume !== 1 ? [`volume=${f3(c.volume)}`] : [];
       // 5 ms edge fades remove clicks at hard cuts without changing the clip length.
@@ -403,11 +405,11 @@ export function buildFilterGraph(plan, seq, { withAudio = true } = {}) {
     const k = i + 1;
     if (t.type === 'cut') {
       parts.push(`${v}${vLabels[k]}concat=n=2:v=1:a=0[x${k}]`);
-      if (withAudio) parts.push(`${a}${aLabels[k]}concat=n=2:v=0:a=1[y${k}]`);
+      if (clipAudio) parts.push(`${a}${aLabels[k]}concat=n=2:v=0:a=1[y${k}]`);
       acc += seq.clips[k].duration;
     } else {
       parts.push(`${v}${vLabels[k]}xfade=transition=${t.type}:duration=${f3(t.duration)}:offset=${f3(acc - t.duration)}[x${k}]`);
-      if (withAudio) parts.push(`${a}${aLabels[k]}acrossfade=d=${f3(t.duration)}:c1=tri:c2=tri[y${k}]`);
+      if (clipAudio) parts.push(`${a}${aLabels[k]}acrossfade=d=${f3(t.duration)}:c1=tri:c2=tri[y${k}]`);
       acc += seq.clips[k].duration - t.duration;
     }
     v = `[x${k}]`;

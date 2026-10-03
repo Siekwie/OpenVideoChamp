@@ -8,74 +8,128 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<div class="app nofile" id="app">
+<div class="app empty" id="app">
 
   <header class="top">
-    <span class="brand">OpenVideoChamp</span>
-    <span class="fileinfo" id="fileinfo" hidden>
-      <span class="filename" id="filename"></span>
-      <span class="filemeta" id="filemeta"></span>
-    </span>
+    <span class="brand"><img src="icon.svg" alt="" width="18" height="18"> OpenVideoChamp</span>
+    <span class="projectname" id="projectName" title="Project">Untitled</span>
     <span class="spacer"></span>
-    <button type="button" id="openBtn">Open</button>
-    <input type="file" id="fileInput" accept="video/*,.mkv,.mov,.mp4,.webm,.avi,.ts,.m4v" hidden>
+    <div class="menu" id="addMenu">
+      <button type="button" class="primary-soft" id="addBtn" aria-haspopup="menu" aria-expanded="false">
+        <svg viewBox="0 0 12 12" width="11" height="11"><path d="M6 1v10M1 6h10" stroke="currentColor" stroke-width="1.6" fill="none"/></svg>
+        Add
+      </button>
+      <div class="menupanel" role="menu" hidden>
+        <button type="button" role="menuitem" id="addFileBtn">Media file…<kbd>video · image · music</kbd></button>
+        <button type="button" role="menuitem" id="addCardBtn">Title card…</button>
+        <div class="menusep" id="addFromSep" hidden></div>
+        <div class="menulabel" id="addFromLabel" hidden>From loaded media</div>
+        <div id="addFromList"></div>
+      </div>
+    </div>
+    <div class="menu" id="projectMenu">
+      <button type="button" id="projectBtn" aria-haspopup="menu" aria-expanded="false">Project ▾</button>
+      <div class="menupanel" role="menu" hidden>
+        <button type="button" role="menuitem" id="saveProjectBtn">Save project…<kbd>Ctrl+S</kbd></button>
+        <button type="button" role="menuitem" id="openProjectBtn">Open project…</button>
+        <div class="menusep"></div>
+        <button type="button" role="menuitem" id="newProjectBtn">New (clear sequence)</button>
+        <div class="menusep"></div>
+        <button type="button" role="menuitem" id="copyDocsBtn">Copy agent instructions</button>
+      </div>
+    </div>
+    <button type="button" class="iconbtn" id="helpBtn" title="Shortcuts and help (?)" aria-label="Help">?</button>
+    <input type="file" id="fileInput" multiple accept="video/*,audio/*,image/*,.mkv,.mov,.mp4,.webm,.avi,.ts,.m4v,.mp3,.wav,.ogg,.flac,.m4a,.png,.jpg,.jpeg,.webp" hidden>
+    <input type="file" id="projectInput" accept=".json,application/json" hidden>
   </header>
 
-  <section class="player" id="player">
-    <div class="dropzone" id="dropzone">
-      <span>Drop a video or</span>
-      <button type="button" id="openBtn2">Open</button>
-      <span class="droperror" id="dropError"></span>
+  <main class="main">
+    <section class="editor">
+      <div class="monitor" id="monitor">
+        <div class="dropzone" id="dropzone">
+          <div class="dropinner">
+            <svg viewBox="0 0 48 48" width="44" height="44" aria-hidden="true"><rect x="6" y="10" width="36" height="28" rx="4" fill="none" stroke="currentColor" stroke-width="2"/><path d="M20 18l12 6-12 6z" fill="currentColor"/></svg>
+            <p class="droptitle">Drop videos, images or music here</p>
+            <p class="muted">Cut clips, join them with transitions, lay music under it and export for Steam or Discord.</p>
+            <div class="dropactions">
+              <button type="button" class="primary" id="openBtn2">Open media…</button>
+              <button type="button" id="cardBtn2">Title card…</button>
+            </div>
+            <p class="droperror" id="dropError"></p>
+          </div>
+        </div>
+        <video id="video" preload="auto" playsinline hidden></video>
+        <img id="image" alt="" hidden>
+        <video id="thumbVideo" preload="auto" muted playsinline hidden></video>
+        <div class="monitorbadge" id="monitorBadge" hidden></div>
+        <div class="monitornote" id="monitorNote" hidden></div>
+        <button type="button" class="monitorback" id="backToSourceBtn" hidden>Back to editing</button>
+      </div>
+
+      <div class="transport needs-file">
+        <button type="button" class="playbtn" id="playBtn" title="Play / pause (Space)">
+          <svg class="ic-play" viewBox="0 0 12 12" width="12" height="12"><path d="M2 1l9 5-9 5z" fill="currentColor"/></svg>
+          <svg class="ic-pause" viewBox="0 0 12 12" width="12" height="12"><path d="M2 1h3v10H2zM7 1h3v10H7z" fill="currentColor"/></svg>
+        </button>
+        <span class="time num"><span id="curTime">00:00.000</span><span class="muted"> / </span><span id="totTime" class="muted">00:00.000</span></span>
+        <span class="muted" id="transportLabel"></span>
+        <span class="spacer"></span>
+        <div class="inout num" id="inout">
+          <label class="muted">In <input type="text" id="inInput" class="num" spellcheck="false" autocomplete="off"></label>
+          <button type="button" class="small" id="setIn" title="Set in point at the playhead (I)">Set in</button>
+          <label class="muted">Out <input type="text" id="outInput" class="num" spellcheck="false" autocomplete="off"></label>
+          <button type="button" class="small" id="setOut" title="Set out point at the playhead (O)">Set out</button>
+          <button type="button" class="small" id="splitBtn" title="Split the clip at the playhead (S)">Split</button>
+          <span class="muted">clip <span id="selLen" class="text">0.00 s</span></span>
+        </div>
+      </div>
+
+      <div class="trim needs-file" id="trim">
+        <div class="track" id="track">
+          <canvas id="strip"></canvas>
+          <canvas id="kfCanvas"></canvas>
+          <div class="dim" id="dimL"></div>
+          <div class="dim" id="dimR"></div>
+          <div class="selbody" id="selBody"></div>
+          <div class="snapmark" id="snapMark" hidden></div>
+          <div class="handle" id="hIn" data-handle="in" title="In"><i></i></div>
+          <div class="handle" id="hOut" data-handle="out" title="Out"><i></i></div>
+          <div class="playhead" id="playhead"><i></i></div>
+        </div>
+        <div class="tracknote" id="trackNote" hidden></div>
+      </div>
+    </section>
+
+    <aside class="inspector" id="inspector">
+      <div class="panel" id="itemPanel"></div>
+      <div class="panel" id="sequencePanel"></div>
+    </aside>
+  </main>
+
+  <section class="sequence needs-file">
+    <div class="seqhead">
+      <span class="seqtitle">Sequence</span>
+      <span class="muted num" id="seqInfo"></span>
+      <span class="spacer"></span>
+      <button type="button" class="small" id="undoBtn" title="Undo (Ctrl+Z)" disabled>Undo</button>
+      <button type="button" class="small" id="redoBtn" title="Redo (Ctrl+Shift+Z)" disabled>Redo</button>
     </div>
-    <div class="uploading" id="uploading" hidden>
-      <div class="bar"><div class="fill" id="uploadFill"></div></div>
-      <span class="uploadtext" id="uploadText"></span>
+    <div class="seqstrip" id="seqStrip">
+      <div class="seqclips" id="seqClips"></div>
+      <button type="button" class="seqadd" id="seqAddBtn" title="Add a clip">+</button>
+      <div class="seqplayhead" id="seqPlayhead" hidden></div>
     </div>
-    <video id="video" preload="auto" playsinline hidden></video>
-    <video id="thumbVideo" preload="auto" muted playsinline hidden></video>
-    <div class="playernote" id="playerNote" hidden></div>
   </section>
 
-  <div class="transport needs-file">
-    <button type="button" class="playbtn" id="playBtn" title="Play / pause (Space)">
-      <svg class="ic-play" viewBox="0 0 12 12" width="12" height="12"><path d="M2 1l9 5-9 5z" fill="currentColor"/></svg>
-      <svg class="ic-pause" viewBox="0 0 12 12" width="12" height="12"><path d="M2 1h3v10H2zM7 1h3v10H7z" fill="currentColor"/></svg>
-    </button>
-    <span class="time num"><span id="curTime">00:00.000</span><span class="muted"> / </span><span id="totTime" class="muted">00:00.000</span></span>
-    <span class="spacer"></span>
-    <span class="muted num">sel <span id="selLen" class="text">0.00 s</span></span>
-  </div>
-
-  <section class="timeline needs-file" id="timeline">
-    <div class="track" id="track">
-      <canvas id="strip"></canvas>
-      <canvas id="kfCanvas"></canvas>
-      <div class="dim" id="dimL"></div>
-      <div class="dim" id="dimR"></div>
-      <div class="selbody" id="selBody"></div>
-      <div class="snapmark" id="snapMark" hidden></div>
-      <div class="handle" id="hIn" data-handle="in" title="In"><i></i></div>
-      <div class="handle" id="hOut" data-handle="out" title="Out"><i></i></div>
-      <div class="playhead" id="playhead"><i></i></div>
-    </div>
-  </section>
-
-  <div class="inout needs-file num">
-    <label class="muted">In <input type="text" id="inInput" class="num" spellcheck="false" autocomplete="off"></label>
-    <button type="button" class="small" id="setIn" title="Set In at playhead (I)">Set in</button>
-    <label class="muted">Out <input type="text" id="outInput" class="num" spellcheck="false" autocomplete="off"></label>
-    <button type="button" class="small" id="setOut" title="Set Out at playhead (O)">Set out</button>
-  </div>
-
-  <section class="output needs-file">
+  <section class="output">
     <div class="row controls">
       <div class="seg" id="presets" role="radiogroup" aria-label="Preset">
-        <button type="button" data-preset="cut">Just cut</button>
-        <button type="button" data-preset="discord">Discord 10 MB</button>
-        <button type="button" data-preset="discord50">50 MB</button>
-        <button type="button" data-preset="discord500">500 MB</button>
-        <button type="button" data-preset="steam">Steam</button>
-        <button type="button" data-preset="custom">Custom</button>
+        <button type="button" data-preset="steam" title="Steam store trailer: 1080p max, 60 fps max, high quality (CRF 18), no size limit">Steam</button>
+        <button type="button" data-preset="discord" title="Under 10 MB (Discord free upload limit)">Discord 10 MB</button>
+        <button type="button" data-preset="discord50" title="Under 50 MB (Discord Nitro Basic)">50 MB</button>
+        <button type="button" data-preset="discord500" title="Under 500 MB (Discord Nitro)">500 MB</button>
+        <button type="button" data-preset="custom" title="Any size target">Custom</button>
+        <button type="button" data-preset="cut" title="No size target. A single untouched clip is copied without re-encoding; anything else is re-encoded at high quality (CRF 20)">No limit</button>
       </div>
       <label class="opt num" id="customWrap" hidden><input type="number" id="targetMB" min="1" step="1" class="num"> MB</label>
       <label class="opt" id="cutWrap"><span>Cut</span>
@@ -85,7 +139,7 @@
       <label class="opt"><span>FPS</span>
         <select id="optFps"><option value="auto">Auto</option><option value="source">Source</option><option value="60">60</option><option value="30">30</option></select></label>
       <label class="opt"><span>Audio</span>
-        <select id="optAudio"><option value="keep">Keep</option><option value="mute">Mute</option></select></label>
+        <select id="optAudio"><option value="keep">Keep</option><option value="mute">None</option></select></label>
       <label class="opt" id="speedWrap"><span>Speed</span>
         <select id="optSpeed"><option value="fast">Fast</option><option value="balanced">Balanced</option><option value="best">Best</option></select></label>
       <label class="opt" id="encoderWrap" hidden><span>Encoder</span>
@@ -94,7 +148,12 @@
     <div class="row estimate-row">
       <div class="estimate" id="estimate"></div>
       <div class="exportarea" id="exportArea">
-        <button type="button" class="primary" id="exportBtn" disabled>Export</button>
+        <button type="button" id="previewBtn" title="Render a quick low-resolution draft of the whole sequence and play it here (P)">Preview</button>
+        <div class="progress" id="previewProgress" hidden>
+          <div class="bar"><div class="fill" id="previewFill"></div></div>
+          <span class="progresstext num" id="previewText"></span>
+        </div>
+        <button type="button" class="primary" id="exportBtn" disabled title="Export (Enter)">Export</button>
         <div class="progress" id="progress" hidden>
           <div class="bar"><div class="fill" id="progressFill"></div></div>
           <span class="progresstext num" id="progressText"></span>
@@ -107,6 +166,7 @@
       <span class="spacer"></span>
       <button type="button" class="small" id="revealBtn" hidden>Show in folder</button>
       <a class="btn small" id="downloadBtn" download hidden>Download</a>
+      <button type="button" class="small" id="dismissResultBtn" title="Dismiss">✕</button>
       <details class="log" id="logDetails" hidden>
         <summary>Show log</summary>
         <pre id="logPre"></pre>
@@ -114,14 +174,85 @@
     </div>
   </section>
 
-  <footer class="foot">
-    <span class="muted shortcuts">Space play · I / O set in/out · ← → frame · Shift+←/→ 1 s · Home/End jump to in/out · Enter export · Esc cancel</span>
-    <span class="spacer"></span>
-    <span class="muted" id="version"></span>
-    <button type="button" class="link" id="copyDocsBtn">Copy agent instructions</button>
-  </footer>
+  <div class="toasts" id="toasts"></div>
 
+  <div class="restore" id="restoreBar" hidden>
+    <span id="restoreText"></span>
+    <button type="button" class="small primary-soft" id="restoreBtn">Restore</button>
+    <button type="button" class="small" id="restoreDismissBtn">Dismiss</button>
+  </div>
 </div>
-<script src="app.js"></script>
+
+<dialog class="modal" id="cardDialog">
+  <form method="dialog" class="modalbody" id="cardForm">
+    <h2>Title card</h2>
+    <div class="cardlayout">
+      <canvas id="cardCanvas" width="640" height="360"></canvas>
+      <div class="cardfields">
+        <label>Title<input type="text" id="cardTitle" value="Coming soon" maxlength="80" autocomplete="off"></label>
+        <label>Subtitle<input type="text" id="cardSubtitle" value="Wishlist now on Steam" maxlength="120" autocomplete="off"></label>
+        <div class="fieldrow">
+          <label>Background<input type="color" id="cardBg" value="#101418"></label>
+          <label>Text<input type="color" id="cardFg" value="#f4f4f6"></label>
+          <label>Accent<input type="color" id="cardAccent" value="#5a9bff"></label>
+        </div>
+        <div class="fieldrow">
+          <label>Style<select id="cardStyle"><option value="center">Centered</option><option value="left">Left aligned</option><option value="bar">Accent bar</option></select></label>
+          <label>Duration<span class="unit"><input type="number" id="cardSeconds" min="0.5" max="60" step="0.5" value="3"> s</span></label>
+        </div>
+        <label class="fieldcheck"><input type="checkbox" id="cardLogo"> Add a logo image…<input type="file" id="cardLogoFile" accept="image/*" hidden></label>
+      </div>
+    </div>
+    <div class="modalactions">
+      <button type="button" value="cancel" id="cardCancelBtn">Cancel</button>
+      <button type="submit" class="primary" id="cardAddBtn">Add to sequence</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog class="modal" id="helpDialog">
+  <div class="modalbody help">
+    <h2>OpenVideoChamp</h2>
+    <div class="helpcols">
+      <div>
+        <h3>Making a trailer</h3>
+        <ol>
+          <li><b>Add</b> your recordings, screenshots and a music track (drop them anywhere).</li>
+          <li>Pick a clip, drag the <b>in / out</b> handles or press <kbd>I</kbd> / <kbd>O</kbd>; <kbd>S</kbd> splits a long recording at the playhead.</li>
+          <li>Drag clips to reorder. Click the marker between two clips to pick a <b>transition</b>.</li>
+          <li>In the panel on the right set <b>fades</b>, <b>music</b> volume and loudness. <kbd>P</kbd> renders a quick draft preview.</li>
+          <li>Choose <b>Steam</b> (or a Discord size) and press <b>Export</b>.</li>
+        </ol>
+        <p class="muted">A single clip with nothing applied and the <i>No limit</i> preset is copied without re-encoding (instant, keyframe accurate). Everything else is re-encoded frame accurately.</p>
+      </div>
+      <div>
+        <h3>Shortcuts</h3>
+        <table class="keys">
+          <tr><td><kbd>Space</kbd></td><td>Play / pause</td></tr>
+          <tr><td><kbd>I</kbd> / <kbd>O</kbd></td><td>Set in / out point</td></tr>
+          <tr><td><kbd>←</kbd> / <kbd>→</kbd></td><td>Step one frame (<kbd>Shift</kbd>: one second)</td></tr>
+          <tr><td><kbd>Home</kbd> / <kbd>End</kbd></td><td>Jump to in / out point</td></tr>
+          <tr><td><kbd>S</kbd></td><td>Split clip at playhead</td></tr>
+          <tr><td><kbd>D</kbd></td><td>Duplicate clip</td></tr>
+          <tr><td><kbd>Delete</kbd></td><td>Remove clip</td></tr>
+          <tr><td><kbd>,</kbd> / <kbd>.</kbd></td><td>Previous / next clip</td></tr>
+          <tr><td><kbd>Alt</kbd>+<kbd>←</kbd> / <kbd>→</kbd></td><td>Move clip earlier / later</td></tr>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd></td><td>Undo / redo</td></tr>
+          <tr><td><kbd>P</kbd></td><td>Render preview</td></tr>
+          <tr><td><kbd>Enter</kbd></td><td>Export</td></tr>
+          <tr><td><kbd>Esc</kbd></td><td>Cancel export / close</td></tr>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>S</kbd></td><td>Save project</td></tr>
+        </table>
+      </div>
+    </div>
+    <div class="modalactions">
+      <span class="muted" id="version"></span>
+      <span class="spacer"></span>
+      <button type="button" class="primary" id="helpCloseBtn">Close</button>
+    </div>
+  </div>
+</dialog>
+
+<script type="module" src="app.js"></script>
 </body>
 </html>
