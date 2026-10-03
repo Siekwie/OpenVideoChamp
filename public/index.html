@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenVideoChamp</title>
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app nofile" id="app">
+
+  <header class="top">
+    <span class="brand">OpenVideoChamp</span>
+    <span class="fileinfo" id="fileinfo" hidden>
+      <span class="filename" id="filename"></span>
+      <span class="filemeta" id="filemeta"></span>
+    </span>
+    <span class="spacer"></span>
+    <button type="button" id="openBtn">Open</button>
+    <input type="file" id="fileInput" accept="video/*,.mkv,.mov,.mp4,.webm,.avi,.ts,.m4v" hidden>
+  </header>
+
+  <section class="player" id="player">
+    <div class="dropzone" id="dropzone">
+      <span>Drop a video or</span>
+      <button type="button" id="openBtn2">Open</button>
+      <span class="droperror" id="dropError"></span>
+    </div>
+    <div class="uploading" id="uploading" hidden>
+      <div class="bar"><div class="fill" id="uploadFill"></div></div>
+      <span class="uploadtext" id="uploadText"></span>
+    </div>
+    <video id="video" preload="auto" playsinline hidden></video>
+    <video id="thumbVideo" preload="auto" muted playsinline hidden></video>
+    <div class="playernote" id="playerNote" hidden></div>
+  </section>
+
+  <div class="transport needs-file">
+    <button type="button" class="playbtn" id="playBtn" title="Play / pause (Space)">
+      <svg class="ic-play" viewBox="0 0 12 12" width="12" height="12"><path d="M2 1l9 5-9 5z" fill="currentColor"/></svg>
+      <svg class="ic-pause" viewBox="0 0 12 12" width="12" height="12"><path d="M2 1h3v10H2zM7 1h3v10H7z" fill="currentColor"/></svg>
+    </button>
+    <span class="time num"><span id="curTime">00:00.000</span><span class="muted"> / </span><span id="totTime" class="muted">00:00.000</span></span>
+    <span class="spacer"></span>
+    <span class="muted num">sel <span id="selLen" class="text">0.00 s</span></span>
+  </div>
+
+  <section class="timeline needs-file" id="timeline">
+    <div class="track" id="track">
+      <canvas id="strip"></canvas>
+      <canvas id="kfCanvas"></canvas>
+      <div class="dim" id="dimL"></div>
+      <div class="dim" id="dimR"></div>
+      <div class="selbody" id="selBody"></div>
+      <div class="snapmark" id="snapMark" hidden></div>
+      <div class="handle" id="hIn" data-handle="in" title="In"><i></i></div>
+      <div class="handle" id="hOut" data-handle="out" title="Out"><i></i></div>
+      <div class="playhead" id="playhead"><i></i></div>
+    </div>
+  </section>
+
+  <div class="inout needs-file num">
+    <label class="muted">In <input type="text" id="inInput" class="num" spellcheck="false" autocomplete="off"></label>
+    <button type="button" class="small" id="setIn" title="Set In at playhead (I)">Set in</button>
+    <label class="muted">Out <input type="text" id="outInput" class="num" spellcheck="false" autocomplete="off"></label>
+    <button type="button" class="small" id="setOut" title="Set Out at playhead (O)">Set out</button>
+  </div>
+
+  <section class="output needs-file">
+    <div class="row controls">
+      <div class="seg" id="presets" role="radiogroup" aria-label="Preset">
+        <button type="button" data-preset="cut">Just cut</button>
+        <button type="button" data-preset="discord">Discord 10 MB</button>
+        <button type="button" data-preset="discord50">50 MB</button>
+        <button type="button" data-preset="discord500">500 MB</button>
+        <button type="button" data-preset="steam">Steam</button>
+        <button type="button" data-preset="custom">Custom</button>
+      </div>
+      <label class="opt num" id="customWrap" hidden><input type="number" id="targetMB" min="1" step="1" class="num"> MB</label>
+      <label class="opt" id="cutWrap"><span>Cut</span>
+        <select id="optCut"><option value="fast">Fast (keyframe)</option><option value="precise">Precise</option></select></label>
+      <label class="opt"><span>Res</span>
+        <select id="optResolution"><option value="auto">Auto</option><option value="source">Source</option><option value="1080">1080p</option><option value="720">720p</option><option value="480">480p</option><option value="360">360p</option></select></label>
+      <label class="opt"><span>FPS</span>
+        <select id="optFps"><option value="auto">Auto</option><option value="source">Source</option><option value="60">60</option><option value="30">30</option></select></label>
+      <label class="opt"><span>Audio</span>
+        <select id="optAudio"><option value="keep">Keep</option><option value="mute">Mute</option></select></label>
+      <label class="opt" id="speedWrap"><span>Speed</span>
+        <select id="optSpeed"><option value="fast">Fast</option><option value="balanced">Balanced</option><option value="best">Best</option></select></label>
+      <label class="opt" id="encoderWrap" hidden><span>Encoder</span>
+        <select id="optEncoder"><option value="auto">Auto</option></select></label>
+    </div>
+    <div class="row estimate-row">
+      <div class="estimate" id="estimate"></div>
+      <div class="exportarea" id="exportArea">
+        <button type="button" class="primary" id="exportBtn" disabled>Export</button>
+        <div class="progress" id="progress" hidden>
+          <div class="bar"><div class="fill" id="progressFill"></div></div>
+          <span class="progresstext num" id="progressText"></span>
+        </div>
+        <button type="button" class="small" id="cancelBtn" hidden>Cancel</button>
+      </div>
+    </div>
+    <div class="row result-row" id="resultRow" hidden>
+      <span class="resulttext" id="resultText"></span>
+      <span class="spacer"></span>
+      <button type="button" class="small" id="revealBtn" hidden>Show in folder</button>
+      <a class="btn small" id="downloadBtn" download hidden>Download</a>
+      <details class="log" id="logDetails" hidden>
+        <summary>Show log</summary>
+        <pre id="logPre"></pre>
+      </details>
+    </div>
+  </section>
+
+  <footer class="foot">
+    <span class="muted shortcuts">Space play · I / O set in/out · ← → frame · Shift+←/→ 1 s · Home/End jump to in/out · Enter export · Esc cancel</span>
+    <span class="spacer"></span>
+    <span class="muted" id="version"></span>
+    <button type="button" class="link" id="copyDocsBtn">Copy agent instructions</button>
+  </footer>
+
+</div>
+<script src="app.js"></script>
+</body>
+</html>

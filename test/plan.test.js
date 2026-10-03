@@ -204,3 +204,15 @@ test('invalid ranges and values are rejected with a 400 error', () => {
   bad({ resolution: 'huge' }, /resolution/);
   bad({ fps: -5 }, /fps/);
 });
+
+test('short clip under a size target is capped at 1.5x the source bitrate instead of inflated', () => {
+  const small = src({ duration: 20, width: 1280, height: 720, fps: 30, bitrate: 2000 });
+  const p = planExport(small, req({ end: 5 }), opts);
+  assert.equal(p.videoKbps, 3000);
+  assert.equal(p.height, 720);
+  assert.equal(p.fps, 30);
+  assert.ok(p.estimatedBytes < 2.5e6, `estimated ${p.estimatedBytes}`);
+  // A long clip still uses the whole budget.
+  const q = planExport(small, req({ end: 20, preset: 'custom', targetMB: 1 }), opts);
+  assert.ok(q.videoKbps < 500);
+});
