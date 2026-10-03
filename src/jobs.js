@@ -10,16 +10,18 @@ const TERMINAL = new Set(['done', 'error', 'cancelled']);
 const EMIT_INTERVAL = 200;
 
 export class Jobs extends EventEmitter {
-  constructor({ ffmpeg, tmpDir }) {
+  constructor({ ffmpeg, tmpDir, capabilities }) {
     super();
     this.ffmpeg = ffmpeg;
     this.tmpDir = tmpDir;
+    this.capabilities = capabilities; // { transitions } filled in asynchronously; undefined = accept every known transition
     this.jobs = new Map();
     this.queue = [];
     this.running = null;
   }
 
-  create(plan, source, request) {
+  // `sources` is a Source, or a function/Map resolving source ids (see plan.js).
+  create(plan, sources, request) {
     let id;
     do id = `j_${randomBytes(4).toString('hex')}`; while (this.jobs.has(id));
     // ffmpeg writes to <name>.part<ext>; it is renamed to the final name only on success, so a
@@ -29,7 +31,7 @@ export class Jobs extends EventEmitter {
     const job = {
       id, status: 'queued', pass: 0, passes: plan.twoPass ? 2 : 1, progress: 0, fps: null, speed: null,
       etaSeconds: null, plan, outputPath: plan.outputPath, tempPath, outputBytes: null, error: null, log: [],
-      args: buildArgs({ ...plan, outputPath: tempPath }, source, request, { passLogFile: path.join(this.tmpDir, `pass-${id}`) }),
+      args: buildArgs({ ...plan, outputPath: tempPath }, sources, request, { passLogFile: path.join(this.tmpDir, `pass-${id}`), transitions: this.capabilities?.transitions }),
       passProgress: 0, proc: null, cancelled: false, startedAt: 0, lastEmit: 0, timer: null,
     };
     job.finished = new Promise((resolve) => { job.resolveFinished = resolve; });
@@ -74,7 +76,7 @@ export class Jobs extends EventEmitter {
 
   toJSON(job) {
     const { id, status, pass, passes, progress, fps, speed, etaSeconds, plan, outputPath, outputBytes, error } = job;
-    return { id, status, pass, passes, progress, fps, speed, etaSeconds, plan, outputPath, outputBytes, error, log: job.log.join('\n') };
+    return { id, status, preview: Boolean(plan.preview), pass, passes, progress, fps, speed, etaSeconds, plan, outputPath, outputBytes, error, log: job.log.join('\n') };
   }
 
   next() {

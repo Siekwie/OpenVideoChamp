@@ -7,7 +7,7 @@ import { randomBytes } from 'node:crypto';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 import { probe, keyframes as probeKeyframes, version as ffmpegVersion } from './ffmpeg.js';
-import { planExport } from './plan.js';
+import { planExport, ALL_TRANSITIONS } from './plan.js';
 import { Jobs, isTerminal } from './jobs.js';
 import { dialogAvailable, openFileDialog, reveal } from './dialog.js';
 
@@ -16,7 +16,12 @@ export const VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'
 export const DEFAULT_OUTPUT_DIR = path.join(os.homedir(), process.platform === 'darwin' ? 'Movies' : 'Videos', 'OpenVideoChamp');
 
 const JSON_LIMIT = 1024 * 1024;
-const VIDEO_TYPES = { '.mp4': 'video/mp4', '.m4v': 'video/mp4', '.mkv': 'video/x-matroska', '.webm': 'video/webm', '.mov': 'video/quicktime' };
+const MEDIA_TYPES = {
+  '.mp4': 'video/mp4', '.m4v': 'video/mp4', '.mkv': 'video/x-matroska', '.webm': 'video/webm', '.mov': 'video/quicktime',
+  '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.bmp': 'image/bmp', '.gif': 'image/gif',
+  '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.ogg': 'audio/ogg', '.oga': 'audio/ogg', '.flac': 'audio/flac', '.m4a': 'audio/mp4',
+  '.aac': 'audio/aac', '.opus': 'audio/ogg',
+};
 const STATIC_TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
   '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.json': 'application/json', '.woff2': 'font/woff2' };
 
@@ -52,6 +57,24 @@ function sendFile(res, file, type, headers = {}) {
   pipeline(fs.createReadStream(file), res).catch(() => {});
 }
 
+// Serves a media file with HTTP Range support so <video>/<audio> can scrub it.
+function sendMedia(req, res, file) {
+  const size = fs.statSync(file).size;
+  const type = MEDIA_TYPES[path.extname(file).toLowerCase()] || 'application/octet-stream';
+  const m = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || '');
+  if (!m) return sendFile(res, file, type, { 'Accept-Ranges': 'bytes', 'Cache-Control': 'no-cache' });
+  let start = m[1] ? Number(m[1]) : size - Number(m[2]);
+  const end = m[1] && m[2] ? Math.min(Number(m[2]), size - 1) : size - 1;
+  if (!m[1] && !m[2]) start = 0;
+  if (start < 0 || start > end || start >= size) {
+    res.writeHead(416, { 'Content-Range': `bytes */${size}` });
+    res.end();
+    return;
+  }
+  res.writeHead(206, { 'Content-Type': type, 'Content-Length': end - start + 1, 'Accept-Ranges': 'bytes', 'Content-Range': `bytes ${start}-${end}/${size}`, 'Cache-Control': 'no-cache' });
+  pipeline(fs.createReadStream(file, { start, end }), res).catch(() => {});
+}
+
 // A browser page from another origin can POST to loopback blind; refuse it. curl and scripts send no Origin.
 function sameOrigin(req) {
   if (req.headers['sec-fetch-site'] === 'cross-site') return false;
@@ -60,15 +83,27 @@ function sameOrigin(req) {
   try { return new URL(origin).host === req.headers.host; } catch { return false; }
 }
 
-export function createServer({ ffmpeg, ffprobe, encoderState, tmpDir, publicDir = path.join(ROOT, 'public') }) {
+// Does this request describe a plain single-clip fast cut (the only case that needs keyframes)?
+function wantsCopy(body) {
+  const clips = Array.isArray(body.clips) ? body.clips : null;
+  if (clips && clips.length !== 1) return null;
+  if ((body.preset ?? 'cut') !== 'cut' || (body.cut ?? 'fast') !== 'fast' || body.music || body.fadeIn || body.fadeOut || body.preview || body.normalize) return null;
+  const clip = clips ? clips[0] : body;
+  if (clip && clip.volume != null && Number(clip.volume) !== 1) return null;
+  return clip ? clip.sourceId : null;
+}
+
+export function createServer({ ffmpeg, ffprobe, capabilities, tmpDir, publicDir = path.join(ROOT, 'public') }) {
+  const caps = capabilities || { encoders: ['libx264'], transitions: ALL_TRANSITIONS, ready: Promise.resolve() };
   const sources = new Map(); // id -> Source
   const keyframeCache = new Map(); // id -> Promise<number[]>
-  const jobs = new Jobs({ ffmpeg, tmpDir });
+  const previewDir = path.join(tmpDir, 'previews');
+  const jobs = new Jobs({ ffmpeg, tmpDir, capabilities: caps });
   const versionPromise = ffmpegVersion(ffmpeg).catch(() => 'unknown');
 
   function source(id) {
     const s = sources.get(id);
-    if (!s) throw new HttpError(404, 'Unknown source');
+    if (!s) throw new HttpError(404, `Unknown source: ${id}`);
     return s;
   }
 
@@ -84,35 +119,39 @@ export function createServer({ ffmpeg, ffprobe, encoderState, tmpDir, publicDir 
     let id;
     do id = `s_${randomBytes(4).toString('hex')}`; while (sources.has(id));
     let info;
-    try { info = await probe(ffprobe, file); } catch (e) { throw new HttpError(e.status || 400, e.status ? e.message : `Not a readable video file: ${e.message}`); }
+    try { info = await probe(ffprobe, file); } catch (e) { throw new HttpError(e.status || 400, e.status ? e.message : `Not a readable media file: ${e.message}`); }
     const src = { id, name, path: file, uploaded, ...info };
     sources.set(id, src);
     // Keyframes are needed for copy-mode plans; compute once, early, in the background.
-    keyframeCache.set(id, probeKeyframes(ffprobe, file).catch(() => []));
+    keyframeCache.set(id, info.kind === 'video' ? probeKeyframes(ffprobe, file).catch(() => []) : Promise.resolve([]));
     return src;
   }
 
+  const getSource = (id) => source(String(id ?? ''));
+
   async function plan(body) {
     if (!body || typeof body !== 'object') throw new HttpError(400, 'Expected a JSON object');
-    const src = source(String(body.sourceId ?? ''));
     // Only a stream-copy plan needs keyframes; don't make every plan wait for the scan of a huge file.
-    const copy = (body.preset ?? 'cut') === 'cut' && (body.cut ?? 'fast') === 'fast';
-    return planExport(src, body, {
-      encoders: encoderState.encoders,
+    const copyId = wantsCopy(body);
+    const keyframes = copyId && sources.has(String(copyId)) ? await keyframeCache.get(String(copyId)) : [];
+    return planExport(getSource, body, {
+      encoders: caps.encoders,
+      transitions: caps.transitions,
       defaultOutputDir: DEFAULT_OUTPUT_DIR,
+      previewDir,
       exists: (p) => fs.existsSync(p) || jobs.reserved(p),
-      keyframes: copy ? await keyframeCache.get(src.id) : [],
+      keyframes,
     });
   }
 
   const routes = [
     ['GET', /^\/api\/info$/, async () => {
       // Give hardware-encoder verification a moment so the first page load sees the full list.
-      await Promise.race([encoderState.ready, new Promise((r) => setTimeout(r, 3000))]);
+      await Promise.race([caps.ready, new Promise((r) => setTimeout(r, 3000))]);
       return {
         version: VERSION, platform: process.platform,
         ffmpeg: { path: ffmpeg, version: await versionPromise },
-        encoders: encoderState.encoders, dialog: dialogAvailable(), defaultOutputDir: DEFAULT_OUTPUT_DIR,
+        encoders: caps.encoders, transitions: caps.transitions, dialog: dialogAvailable(), defaultOutputDir: DEFAULT_OUTPUT_DIR,
       };
     }],
     ['GET', /^\/api\/docs$/, (req, res) => sendFile(res, path.join(ROOT, 'docs', 'API.md'), 'text/markdown; charset=utf-8')],
@@ -133,30 +172,15 @@ export function createServer({ ffmpeg, ffprobe, encoderState, tmpDir, publicDir 
       await pipeline(req, fs.createWriteStream(file));
       return register(file, { uploaded: true, name });
     }],
+    ['GET', /^\/api\/sources$/, () => [...sources.values()]],
     ['GET', /^\/api\/sources\/([\w-]+)$/, (req, res, url, id) => source(id)],
     ['GET', /^\/api\/sources\/([\w-]+)\/keyframes$/, async (req, res, url, id) => ({ times: await keyframeCache.get(source(id).id) })],
-    ['GET', /^\/api\/sources\/([\w-]+)\/stream$/, (req, res, url, id) => {
-      const src = source(id);
-      const size = fs.statSync(src.path).size;
-      const type = VIDEO_TYPES[path.extname(src.path).toLowerCase()] || 'application/octet-stream';
-      const m = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || '');
-      if (!m) return sendFile(res, src.path, type, { 'Accept-Ranges': 'bytes' });
-      let start = m[1] ? Number(m[1]) : size - Number(m[2]);
-      let end = m[1] && m[2] ? Math.min(Number(m[2]), size - 1) : size - 1;
-      if (!m[1] && !m[2]) start = 0;
-      if (start < 0 || start > end || start >= size) {
-        res.writeHead(416, { 'Content-Range': `bytes */${size}` });
-        res.end();
-        return;
-      }
-      res.writeHead(206, { 'Content-Type': type, 'Content-Length': end - start + 1, 'Accept-Ranges': 'bytes', 'Content-Range': `bytes ${start}-${end}/${size}` });
-      pipeline(fs.createReadStream(src.path, { start, end }), res).catch(() => {});
-    }],
+    ['GET', /^\/api\/sources\/([\w-]+)\/stream$/, (req, res, url, id) => sendMedia(req, res, source(id).path)],
     ['POST', /^\/api\/plan$/, async (req) => plan(await readJson(req))],
     ['POST', /^\/api\/export$/, async (req) => {
       const body = await readJson(req);
       const p = await plan(body);
-      const j = jobs.create(p, source(body.sourceId), body);
+      const j = jobs.create(p, getSource, body);
       return { jobId: j.id };
     }],
     ['GET', /^\/api\/jobs\/([\w-]+)$/, (req, res, url, id) => job(id)],
@@ -177,9 +201,15 @@ export function createServer({ ffmpeg, ffprobe, encoderState, tmpDir, publicDir 
       const j = job(id);
       if (j.status !== 'done') throw new HttpError(409, `Job is ${j.status}, not done`);
       const name = path.basename(j.outputPath);
-      sendFile(res, j.outputPath, VIDEO_TYPES[path.extname(name).toLowerCase()] || 'application/octet-stream', {
+      sendFile(res, j.outputPath, MEDIA_TYPES[path.extname(name).toLowerCase()] || 'application/octet-stream', {
         'Content-Disposition': `attachment; filename="${name.replace(/[^\x20-\x7e]|["\\]/g, '_')}"; filename*=UTF-8''${encodeURIComponent(name)}`,
       });
+    }],
+    ['GET', /^\/api\/jobs\/([\w-]+)\/stream$/, (req, res, url, id) => {
+      const j = job(id);
+      if (j.status !== 'done') throw new HttpError(409, `Job is ${j.status}, not done`);
+      if (!fs.existsSync(j.outputPath)) throw new HttpError(404, 'Output file does not exist');
+      sendMedia(req, res, j.outputPath);
     }],
     ['POST', /^\/api\/jobs\/([\w-]+)\/reveal$/, async (req, res, url, id) => {
       const j = job(id);
