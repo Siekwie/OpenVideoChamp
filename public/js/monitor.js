@@ -1,30 +1,30 @@
 // The monitor (video/image/preview playback + transport) and the trim track of the selected clip.
-import { $, clamp, round3, MIN_LEN, fmtTime, fmtSec, parseTime, once, sizeCanvas, drawCover } from './util.js';
+import { $, clamp, round3, MIN_LEN, fmtTime, fmtSec, once, sizeCanvas, drawCover } from './util.js';
 import { api } from './api.js';
-import { state, on, emit, source, clipSource, selectedClip, selectedIndex, selectClip, isImage, checkpoint, afterEdit, setClipRange, splitClip, copyCandidate, setMonitorMode, totalDuration } from './state.js';
+import { state, on, emit, source, clipSource, selectedClip, selectedIndex, selectClip, isImage, checkpoint, afterEdit, edit, setClipRange, splitClip, copyCandidate, setMonitorMode, totalDuration } from './state.js';
 
 const el = {};
-for (const id of ['monitor', 'dropzone', 'dropError', 'video', 'image', 'thumbVideo', 'monitorBadge', 'monitorNote', 'backToSourceBtn', 'playBtn', 'curTime', 'totTime',
-  'transportLabel', 'inout', 'inInput', 'outInput', 'setIn', 'setOut', 'splitBtn', 'selLen', 'trim', 'track', 'strip', 'kfCanvas', 'dimL', 'dimR', 'selBody',
+for (const id of ['dropzone', 'video', 'image', 'thumbVideo', 'monitorBadge', 'monitorNote', 'backToSourceBtn', 'playBtn', 'curTime', 'totTime',
+  'transportLabel', 'setIn', 'setOut', 'splitBtn', 'track', 'strip', 'kfCanvas', 'dimL', 'dimR', 'selBody',
   'snapMark', 'hIn', 'hOut', 'playhead', 'trackNote']) el[id] = $(id);
 const video = el.video;
 
 let loadedUrl = null;      // what the <video> currently has
 let shownSourceId = null;  // the source shown in source mode
+let lastIndex = 0;         // the clip that stays on screen while the music is selected
 let rafId = 0;
 let drag = null;
 
 // ---------- what is on screen ----------
 
-// The clip the monitor shows: the selected one, or the clip before a selected transition.
+// The clip the monitor shows: the selected one, the clip before a selected transition, or
+// (with the music selected) whatever was showing before.
 export function monitorIndex() {
   const s = state.selection;
-  if (!s) return -1;
-  return s.kind === 'clip' ? s.index : Math.min(s.index, state.clips.length - 1);
+  if (s && s.kind !== 'music') lastIndex = s.index;
+  return Math.min(lastIndex, state.clips.length - 1);
 }
 export function currentClip() { return state.clips[monitorIndex()] || null; }
-
-function previewActive() { return state.monitorMode === 'preview' && state.preview && !state.preview.stale; }
 
 // Source-time bounds of playback in source mode.
 function bounds() {
@@ -102,8 +102,7 @@ function renderTransport() {
   const total = preview ? (state.preview.duration || 0) : image ? c.end - c.start : clipSource(c)?.duration || 0;
   el.totTime.textContent = fmtTime(total);
   el.transportLabel.textContent = preview ? 'sequence time' : image ? 'still image' : 'source time';
-  el.inout.hidden = !c || preview || image || state.selection?.kind !== 'clip';
-  el.splitBtn.disabled = !c || image;
+  el.setIn.disabled = el.setOut.disabled = el.splitBtn.disabled = !c || !!preview || image || state.selection?.kind !== 'clip';
   renderTime();
 }
 
@@ -165,39 +164,32 @@ export function jumpTo(which) {
 
 // ---------- in / out editing ----------
 
-export function setIn(t) {
+// The selected clip, when the playhead is a position inside its source (not a still, not the draft preview).
+function markable() {
   const c = selectedClip();
-  if (!c || isImage(c)) return;
-  checkpoint();
-  let end = c.end;
-  if (t > end - MIN_LEN) end = clipSource(c).duration;
-  setClipRange(c, t, end);
-  afterEdit();
+  return c && !isImage(c) && state.monitorMode !== 'preview' ? c : null;
 }
 
-export function setOut(t) {
-  const c = selectedClip();
-  if (!c || isImage(c)) return;
-  checkpoint();
-  let start = c.start;
-  if (t < start + MIN_LEN) start = 0;
-  setClipRange(c, start, t);
-  afterEdit();
+// An in point past the out point (or the reverse) moves the other end out of the way, to the source's edge.
+export function setInAtPlayhead() {
+  const c = markable(), t = video.currentTime;
+  if (c) edit(() => setClipRange(c, t, t > c.end - MIN_LEN ? clipSource(c).duration : c.end));
+}
+
+export function setOutAtPlayhead() {
+  const c = markable(), t = video.currentTime;
+  if (c) edit(() => setClipRange(c, t < c.start + MIN_LEN ? 0 : c.start, t));
 }
 
 export function splitAtPlayhead() {
-  const i = selectedIndex();
-  if (i < 0 || state.monitorMode === 'preview') return false;
-  return splitClip(i, video.currentTime);
+  return markable() ? splitClip(selectedIndex(), video.currentTime) : false;
 }
 
-function commitTimeInput(input, which) {
-  const c = selectedClip();
-  if (!c) return;
-  const t = parseTime(input.value);
-  if (t == null) { input.value = fmtTime(which === 'in' ? c.start : c.end); return; }
-  if (which === 'in') setIn(t); else setOut(t);
-  input.value = fmtTime(which === 'in' ? c.start : c.end);
+// Plays the draft preview from the top (the monitor has just been switched to it).
+export function playPreview() {
+  if (state.monitorMode !== 'preview' || !state.preview) return;
+  if (video.readyState > 0) video.currentTime = 0;
+  video.play().catch(() => {});
 }
 
 // ---------- trim track ----------
@@ -223,7 +215,7 @@ export function renderTrack() {
   el.trackNote.hidden = show || !c;
   if (!show) {
     if (preview) el.trackNote.textContent = 'Playing the draft preview of the whole sequence. Click a clip below to go back to editing it.';
-    else if (image) el.trackNote.textContent = `Still image, shown for ${fmtSec(c.end - c.start, 1)}. Change the duration in the panel on the right.`;
+    else if (image) el.trackNote.textContent = `Still image, shown for ${fmtSec(c.end - c.start, 1)}. Change how long in the panel on the right.`;
     return;
   }
   const dur = src.duration || 1;
@@ -234,9 +226,6 @@ export function renderTrack() {
   el.selBody.style.width = pct(c.end - c.start);
   el.hIn.style.left = pct(c.start);
   el.hOut.style.left = pct(c.end);
-  if (document.activeElement !== el.inInput) el.inInput.value = fmtTime(c.start);
-  if (document.activeElement !== el.outInput) el.outInput.value = fmtTime(c.end);
-  el.selLen.textContent = fmtSec(c.end - c.start);
   const kf = showKeyframes() ? snappedKeyframe(src, c.start) : null;
   const showSnap = kf != null && c.start - kf > 0.02;
   el.snapMark.hidden = !showSnap;
@@ -414,16 +403,8 @@ export function initMonitor() {
   el.track.addEventListener('pointercancel', onTrackUp);
   new ResizeObserver(() => renderTrack()).observe(el.track);
 
-  for (const [input, which] of [[el.inInput, 'in'], [el.outInput, 'out']]) {
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') { commitTimeInput(input, which); input.blur(); }
-      else if (e.key === 'Escape') { const c = selectedClip(); if (c) input.value = fmtTime(which === 'in' ? c.start : c.end); }
-    });
-    input.addEventListener('blur', () => commitTimeInput(input, which));
-    input.addEventListener('focus', () => input.select());
-  }
-  el.setIn.addEventListener('click', () => setIn(video.currentTime));
-  el.setOut.addEventListener('click', () => setOut(video.currentTime));
+  el.setIn.addEventListener('click', setInAtPlayhead);
+  el.setOut.addEventListener('click', setOutAtPlayhead);
   el.splitBtn.addEventListener('click', splitAtPlayhead);
 
   on('selection', renderMonitor);

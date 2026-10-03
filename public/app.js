@@ -1,9 +1,9 @@
 // Entry point: wires the modules together, handles media import, menus, keyboard shortcuts.
-import { $, h, fmtShort } from './js/util.js';
+import { $, h, clamp, fmtShort } from './js/util.js';
 import { api, upload } from './js/api.js';
-import { state, on, emit, addSource, addClip, removeClip, duplicateClip, moveClip, selectClip, selectedIndex, selectedClip, setMusic, undo, redo, clearSequence,
-  loadOutputOptions, isImage, jobActive } from './js/state.js';
-import { initMonitor, togglePlay, stepFrames, jumpTo, setIn, setOut, splitAtPlayhead, renderMonitor } from './js/monitor.js';
+import { state, on, emit, addSource, addClip, removeClip, duplicateClip, moveClip, select, selectClip, selectedIndex, setMusic, setTransition, undo, redo, clearSequence,
+  loadOutputOptions, DEFAULT_MUSIC } from './js/state.js';
+import { initMonitor, togglePlay, stepFrames, jumpTo, setInAtPlayhead, setOutAtPlayhead, splitAtPlayhead, renderMonitor } from './js/monitor.js';
 import { initSequence, setSequenceHandlers, renderSequence } from './js/sequence.js';
 import { initInspector, setInspectorHandlers, renderInspector } from './js/inspector.js';
 import { initOutput, startExport, startPreview, cancelJobs, requestPlan, renderOptions } from './js/output.js';
@@ -11,82 +11,26 @@ import { initTitleCard, openTitleCard } from './js/titlecard.js';
 import { initProject, downloadProject, loadProjectFile, loadProject, autosaved, clearAutosave, projectName } from './js/project.js';
 
 const el = {};
-for (const id of ['app', 'projectName', 'addMenu', 'addBtn', 'addFileBtn', 'addCardBtn', 'addFromSep', 'addFromLabel', 'addFromList', 'projectMenu', 'projectBtn',
+for (const id of ['app', 'projectName', 'addMenu', 'addBtn', 'addFileBtn', 'addCardBtn', 'addMusicBtn', 'addFromSep', 'addFromLabel', 'addFromList', 'projectMenu', 'projectBtn',
   'saveProjectBtn', 'openProjectBtn', 'newProjectBtn', 'copyDocsBtn', 'helpBtn', 'fileInput', 'projectInput', 'openBtn2', 'cardBtn2', 'dropError', 'toasts',
-  'restoreBar', 'restoreText', 'restoreBtn', 'restoreDismissBtn', 'helpDialog', 'helpCloseBtn', 'version', 'video']) el[id] = $(id);
+  'restoreBar', 'restoreText', 'restoreBtn', 'restoreDismissBtn', 'helpDialog', 'helpCloseBtn', 'version']) el[id] = $(id);
 
 // ---------- toasts ----------
 
-export function toast(message, { kind = 'info', ttl = 4000, progress } = {}) {
-  const t = h('div', { class: `toast ${kind}` }, h('span', { class: 'toasttext', text: message }), progress != null ? h('div', { class: 'toastbar' }, h('div', { class: 'toastfill' })) : null);
+function toast(message, { kind = 'info', ttl = 4000, progress = false } = {}) {
+  const text = h('span', { class: 'toasttext', text: message });
+  const fill = progress ? h('div', { class: 'toastfill' }) : null;
+  const t = h('div', { class: `toast ${kind}` }, text, fill ? h('div', { class: 'toastbar' }, fill) : null);
   el.toasts.append(t);
-  const api2 = {
+  const handle = {
     update(msg, frac) {
-      if (msg != null) t.querySelector('.toasttext').textContent = msg;
-      const fill = t.querySelector('.toastfill');
-      if (fill && frac != null) fill.style.width = `${Math.round(frac * 100)}%`;
+      text.textContent = msg;
+      if (fill) fill.style.width = `${Math.round(frac * 100)}%`;
     },
     close(after = 0) { setTimeout(() => { t.classList.add('out'); setTimeout(() => t.remove(), 200); }, after); },
   };
-  if (ttl) api2.close(ttl);
-  return api2;
-}
-
-// ---------- adding media ----------
-
-let musicPending = false; // the next audio file becomes the music track
-
-function placeSource(src, { seconds } = {}) {
-  addSource(src);
-  if (src.kind === 'audio') {
-    if (!state.music || musicPending) {
-      setMusic({ sourceId: src.id, start: 0, volume: 0.5, fadeIn: 1, fadeOut: 2, loop: true, mode: 'mix' });
-      toast(`Music: ${src.name}`);
-    } else toast(`${src.name} is loaded; pick it in the Music panel.`);
-    musicPending = false;
-    return;
-  }
-  if (musicPending && src.hasAudio) {
-    setMusic({ sourceId: src.id, start: 0, volume: 0.5, fadeIn: 1, fadeOut: 2, loop: true, mode: 'mix' });
-    musicPending = false;
-    toast(`Music: ${src.name}`);
-    return;
-  }
-  musicPending = false;
-  addClip(src, seconds ? { end: seconds } : {});
-}
-
-async function openPath(path) {
-  try { placeSource(await api.open(path)); } catch (err) { showError(err.message); }
-}
-
-async function openDialog() {
-  if (state.info && state.info.dialog === false) return el.fileInput.click();
-  try {
-    const data = await api.openDialog();
-    if (data.unsupported) return el.fileInput.click();
-    if (data.cancelled) { musicPending = false; return; }
-    placeSource(data);
-  } catch (err) {
-    if (err.message === 'Failed to fetch') el.fileInput.click(); else showError(err.message);
-  }
-}
-
-async function uploadFiles(files) {
-  const list = [...files].filter((f) => f && f.size);
-  if (!list.length) return;
-  if (list.length === 1 && /\.(json)$/i.test(list[0].name)) return openProjectFile(list[0]);
-  for (const file of list) {
-    const t = toast(`Importing ${file.name}…`, { ttl: 0, progress: 0 });
-    try {
-      const src = await upload(file, file.name, (f) => t.update(`Importing ${file.name} · ${Math.round(f * 100)}%`, f));
-      t.close();
-      placeSource(src);
-    } catch (err) {
-      t.close();
-      showError(`${file.name}: ${err.message}`);
-    }
-  }
+  if (ttl) handle.close(ttl);
+  return handle;
 }
 
 function showError(msg) {
@@ -94,60 +38,114 @@ function showError(msg) {
   toast(msg, { kind: 'error', ttl: 7000 });
 }
 
+// ---------- adding media ----------
+
+function useAsMusic(src) {
+  setMusic({ ...DEFAULT_MUSIC, sourceId: src.id });
+  select({ kind: 'music' });
+}
+
+// Puts a freshly opened source where it belongs: videos and images become clips, audio becomes the
+// music track (unless there already is one). `music` forces "use this as the music".
+function placeSource(src, { seconds, music = false } = {}) {
+  addSource(src);
+  if (music) {
+    if (src.hasAudio) useAsMusic(src); else showError(`${src.name} has no sound to use as music.`);
+  } else if (src.kind !== 'audio') addClip(src, { seconds });
+  else if (!state.music) useAsMusic(src);
+  else toast(`${src.name} is loaded. Pick it in the music panel to replace the current track.`, { ttl: 6000 });
+}
+
+async function openPath(path) {
+  try { placeSource(await api.open(path)); } catch (err) { showError(err.message); }
+}
+
+// Without a native dialog the browser's own file picker is used; it has to remember what the pick is for.
+function pickInBrowser(music) {
+  el.fileInput.dataset.music = music ? '1' : '';
+  el.fileInput.multiple = !music;
+  el.fileInput.click();
+}
+
+async function openDialog({ music = false } = {}) {
+  if (state.info?.dialog === false) return pickInBrowser(music);
+  try {
+    const data = await api.openDialog(!music);
+    if (data.unsupported) return pickInBrowser(music);
+    if (data.cancelled) return;
+    for (const src of data.sources || [data]) placeSource(src, { music });
+    for (const f of data.failed || []) showError(`${f.path.split(/[\\/]/).pop()}: ${f.error}`);
+  } catch (err) {
+    if (err.message === 'Failed to fetch') pickInBrowser(music); else showError(err.message);
+  }
+}
+
+async function uploadFiles(files, { music = false } = {}) {
+  const list = [...files].filter((f) => f && f.size);
+  const project = list.find((f) => /\.json$/i.test(f.name));
+  if (project) return openProjectFile(project);
+  for (const file of list) {
+    const t = toast(`Importing ${file.name}…`, { ttl: 0, progress: true });
+    try {
+      const src = await upload(file, file.name, { onProgress: (f) => t.update(`Importing ${file.name} · ${Math.round(f * 100)}%`, f) });
+      placeSource(src, { music });
+    } catch (err) {
+      showError(`${file.name}: ${err.message}`);
+    }
+    t.close();
+  }
+}
+
 // ---------- menus ----------
 
+const menus = () => [el.addMenu, el.projectMenu];
+let menuAnchor = null;
+
 function closeMenus() {
-  for (const m of [el.addMenu, el.projectMenu]) {
-    m.querySelector('.menupanel').hidden = true;
-    m.querySelector('button').setAttribute('aria-expanded', 'false');
-  }
+  for (const m of menus()) m.querySelector('.menupanel').hidden = true;
+  if (menuAnchor) menuAnchor.setAttribute('aria-expanded', 'false');
+  menuAnchor = null;
 }
 
-function toggleMenu(menu) {
-  const panel = menu.querySelector('.menupanel');
-  const open = panel.hidden;
+// Opens `menu` next to the button that asked for it (the Add menu has two: top bar and sequence strip).
+function toggleMenu(menu, anchor) {
+  const wasOpen = menuAnchor === anchor;
   closeMenus();
-  if (open) {
-    if (menu === el.addMenu) renderAddFrom();
-    panel.hidden = false;
-    menu.querySelector('button').setAttribute('aria-expanded', 'true');
-  }
+  if (wasOpen) return;
+  if (menu === el.addMenu) renderAddFrom();
+  const panel = menu.querySelector('.menupanel');
+  panel.hidden = false;
+  const a = anchor.getBoundingClientRect(), p = panel.getBoundingClientRect();
+  const below = a.bottom + 6 + p.height <= window.innerHeight - 8;
+  panel.style.left = `${clamp(a.right - p.width, 8, window.innerWidth - p.width - 8)}px`;
+  panel.style.top = `${below ? a.bottom + 6 : Math.max(8, a.top - 6 - p.height)}px`;
+  anchor.setAttribute('aria-expanded', 'true');
+  menuAnchor = anchor;
 }
 
+// Media that is already loaded can be added again without going through the file dialog.
 function renderAddFrom() {
   const sources = [...state.sources.values()].filter((s) => s.kind !== 'audio');
   el.addFromSep.hidden = el.addFromLabel.hidden = !sources.length;
   el.addFromList.replaceChildren(...sources.map((s) => h('button', {
     type: 'button', role: 'menuitem', onclick: () => { closeMenus(); addClip(s); },
-  }, s.name, h('kbd', { text: s.kind === 'image' ? 'image' : fmtShort(s.duration) }))));
-  el.addFromList.append(h('div', { class: 'menusep' }), h('button', { type: 'button', role: 'menuitem', onclick: () => { closeMenus(); musicPending = true; openDialog(); } }, 'Music track…', h('kbd', { text: 'audio' })));
+  }, h('span', { class: 'menutext', text: s.name }), h('kbd', { text: s.kind === 'image' ? 'image' : fmtShort(s.duration) }))));
 }
 
 // ---------- project ----------
 
-async function openProjectFile(file) {
-  const t = toast('Opening project…', { ttl: 0 });
-  try {
-    const { missing, dropped } = await loadProjectFile(file);
-    t.close();
-    report(missing, dropped);
-  } catch (err) { t.close(); showError(err.message); }
-}
-
-function report(missing, dropped) {
+function report({ missing, dropped }, quiet) {
   if (missing.length) toast(`Could not find: ${missing.join(', ')}${dropped ? ` (${dropped} clip${dropped === 1 ? '' : 's'} dropped)` : ''}`, { kind: 'error', ttl: 9000 });
-  else toast('Project loaded');
+  else if (!quiet) toast('Project loaded');
 }
 
-async function restoreSession(data) {
-  el.restoreBar.hidden = true;
-  const t = toast('Restoring…', { ttl: 0 });
-  try {
-    const { missing, dropped } = await loadProject(data);
-    t.close();
-    if (missing.length) report(missing, dropped);
-  } catch (err) { t.close(); showError(err.message); }
+async function openProject(load, { label = 'Opening project…', quiet = false } = {}) {
+  const t = toast(label, { ttl: 0 });
+  try { report(await load(), quiet); } catch (err) { showError(err.message); }
+  t.close();
 }
+
+const openProjectFile = (file) => openProject(() => loadProjectFile(file));
 
 function renderTitle() {
   const name = projectName();
@@ -158,13 +156,20 @@ function renderTitle() {
 
 // ---------- keyboard ----------
 
+function removeSelected() {
+  const s = state.selection;
+  if (s?.kind === 'clip') removeClip(s.index);
+  else if (s?.kind === 'transition') setTransition(s.index, { type: 'cut', duration: 0 });
+  else if (s?.kind === 'music' && state.music) setMusic(null);
+}
+
 function onKey(e) {
   const t = e.target;
   const inField = t.matches && t.matches('input, select, textarea');
   const dialogOpen = document.querySelector('dialog[open]');
   if (e.key === 'Escape') {
     if (dialogOpen) return;
-    if (inField) t.blur(); else { closeMenus(); cancelJobs(); }
+    if (inField) t.blur(); else if (menuAnchor) closeMenus(); else cancelJobs();
     return;
   }
   if (dialogOpen) return;
@@ -177,7 +182,7 @@ function onKey(e) {
   }
   if (inField) return;
   const onButton = t.matches && t.matches('button, a, summary');
-  if (e.key === '?' || (e.key === '/' && e.shiftKey)) { e.preventDefault(); el.helpDialog.showModal(); return; }
+  if (e.key === '?') { e.preventDefault(); el.helpDialog.showModal(); return; }
   if (!state.clips.length) return;
   const i = selectedIndex();
   if (e.altKey) {
@@ -187,8 +192,8 @@ function onKey(e) {
   }
   switch (e.key) {
     case ' ': if (onButton) return; e.preventDefault(); togglePlay(); break;
-    case 'i': case 'I': setIn(el.video.currentTime); break;
-    case 'o': case 'O': setOut(el.video.currentTime); break;
+    case 'i': case 'I': setInAtPlayhead(); break;
+    case 'o': case 'O': setOutAtPlayhead(); break;
     case 's': case 'S': splitAtPlayhead(); break;
     case 'd': case 'D': if (i >= 0) duplicateClip(i); break;
     case 'p': case 'P': startPreview(); break;
@@ -196,9 +201,9 @@ function onKey(e) {
     case 'ArrowRight': e.preventDefault(); stepFrames(1, e.shiftKey); break;
     case 'Home': e.preventDefault(); jumpTo('in'); break;
     case 'End': e.preventDefault(); jumpTo('out'); break;
-    case ',': case '<': if (i > 0) selectClip(i - 1); else if (i < 0) selectClip(0); break;
-    case '.': case '>': if (i >= 0 && i < state.clips.length - 1) selectClip(i + 1); else if (i < 0) selectClip(0); break;
-    case 'Delete': case 'Backspace': if (i >= 0 && !onButton) { e.preventDefault(); removeClip(i); } break;
+    case ',': case '<': selectClip(Math.max(0, i - 1)); break;
+    case '.': case '>': selectClip(i < 0 ? 0 : Math.min(state.clips.length - 1, i + 1)); break;
+    case 'Delete': case 'Backspace': if (!onButton) { e.preventDefault(); removeSelected(); } break;
     case 'Enter': if (onButton) return; startExport(); break;
     default: return;
   }
@@ -206,30 +211,32 @@ function onKey(e) {
 
 // ---------- init ----------
 
-async function init() {
+function init() {
   loadOutputOptions();
   initMonitor();
   initSequence();
   initInspector();
   initOutput();
-  initTitleCard((src, seconds) => placeSource(src, { seconds }));
+  initTitleCard({ add: (src, seconds) => placeSource(src, { seconds }), error: showError });
   initProject();
-  setSequenceHandlers({ add: () => toggleMenu(el.addMenu), transitionDblClick: (i) => { const t = state.transitions[i]; if (t.type === 'cut') emit('transition-quick', i); } });
-  setInspectorHandlers({ addMusic: () => { musicPending = true; openDialog(); } });
+  const addMusic = () => openDialog({ music: true });
+  setSequenceHandlers({ add: (anchor) => toggleMenu(el.addMenu, anchor), addMusic });
+  setInspectorHandlers({ addMusic });
 
-  el.addBtn.addEventListener('click', () => toggleMenu(el.addMenu));
-  el.projectBtn.addEventListener('click', () => toggleMenu(el.projectMenu));
+  el.addBtn.addEventListener('click', () => toggleMenu(el.addMenu, el.addBtn));
+  el.projectBtn.addEventListener('click', () => toggleMenu(el.projectMenu, el.projectBtn));
   el.addFileBtn.addEventListener('click', () => { closeMenus(); openDialog(); });
   el.addCardBtn.addEventListener('click', () => { closeMenus(); openTitleCard(); });
-  el.openBtn2.addEventListener('click', openDialog);
+  el.addMusicBtn.addEventListener('click', () => { closeMenus(); addMusic(); });
+  el.openBtn2.addEventListener('click', () => openDialog());
   el.cardBtn2.addEventListener('click', openTitleCard);
-  el.fileInput.addEventListener('change', () => { uploadFiles(el.fileInput.files); el.fileInput.value = ''; });
-  el.saveProjectBtn.addEventListener('click', () => { closeMenus(); downloadProject(); });
+  el.fileInput.addEventListener('change', () => { uploadFiles(el.fileInput.files, { music: !!el.fileInput.dataset.music }); el.fileInput.value = ''; });
+  el.saveProjectBtn.addEventListener('click', () => { closeMenus(); if (state.clips.length) downloadProject(); else toast('Nothing to save yet'); });
   el.openProjectBtn.addEventListener('click', () => { closeMenus(); el.projectInput.click(); });
   el.projectInput.addEventListener('change', () => { if (el.projectInput.files[0]) openProjectFile(el.projectInput.files[0]); el.projectInput.value = ''; });
   el.newProjectBtn.addEventListener('click', () => {
     closeMenus();
-    if (!state.clips.length || confirm('Clear the sequence? Loaded media stays available under Add.')) { clearSequence(); state.projectName = null; clearAutosave(); }
+    if (!state.clips.length || confirm('Clear the sequence? Loaded media stays available under Add.')) { clearSequence(); state.projectName = null; clearAutosave(); renderTitle(); }
   });
   el.copyDocsBtn.addEventListener('click', async () => {
     closeMenus();
@@ -237,13 +244,15 @@ async function init() {
   });
   el.helpBtn.addEventListener('click', () => el.helpDialog.showModal());
   el.helpCloseBtn.addEventListener('click', () => el.helpDialog.close());
-  document.addEventListener('pointerdown', (e) => { if (!e.target.closest('.menu')) closeMenus(); });
+  document.addEventListener('pointerdown', (e) => { if (!e.target.closest('.menu, [data-menu]')) closeMenus(); });
+  window.addEventListener('resize', closeMenus);
   for (const d of document.querySelectorAll('dialog')) d.addEventListener('click', (e) => { if (e.target === d) d.close(); });
 
   let dragDepth = 0;
-  document.addEventListener('dragenter', (e) => { e.preventDefault(); if (++dragDepth === 1) el.app.classList.add('dragging'); });
-  document.addEventListener('dragover', (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; });
-  document.addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; el.app.classList.remove('dragging'); } });
+  const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes('Files');
+  document.addEventListener('dragenter', (e) => { if (!hasFiles(e)) return; e.preventDefault(); if (++dragDepth === 1) el.app.classList.add('dragging'); });
+  document.addEventListener('dragover', (e) => { if (!hasFiles(e)) return; e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; });
+  document.addEventListener('dragleave', (e) => { if (hasFiles(e) && --dragDepth <= 0) { dragDepth = 0; el.app.classList.remove('dragging'); } });
   document.addEventListener('drop', (e) => {
     e.preventDefault();
     dragDepth = 0;
@@ -256,9 +265,9 @@ async function init() {
   window.addEventListener('keydown', onKey);
 
   on('sequence', renderTitle);
+  on('sequence', () => { el.restoreBar.hidden = true; }); // the autosave now holds the new work, not the old session
   on('sources', renderTitle);
   on('job-done', (job) => { if (job.status === 'done') toast(`Exported ${job.outputPath.split(/[\\/]/).pop()}`, { kind: 'ok' }); });
-  on('transition-quick', (i) => { import('./js/state.js').then((m) => m.setTransition(i, { type: 'fade', duration: 0.5 })); });
 
   renderTitle();
   renderMonitor();
@@ -273,22 +282,20 @@ async function init() {
     renderOptions();
   }).catch(() => toast('Cannot reach the local server', { kind: 'error', ttl: 0 }));
 
-  const path = new URLSearchParams(location.search).get('path');
-  if (path) {
+  // `ovc <file>` opens the UI with ?path= (a media file) or ?project= (a saved project).
+  const query = new URLSearchParams(location.search);
+  if (query.has('path') || query.has('project')) {
     history.replaceState(null, '', location.pathname);
-    openPath(path);
-  } else {
-    const saved = autosaved();
-    if (saved) {
-      el.restoreText.textContent = `Restore your last session? ${saved.name || 'Untitled'} · ${saved.clips.length} clip${saved.clips.length === 1 ? '' : 's'}`;
-      el.restoreBar.hidden = false;
-      el.restoreBtn.onclick = () => restoreSession(saved);
-      el.restoreDismissBtn.onclick = () => { el.restoreBar.hidden = true; clearAutosave(); };
-    }
+    if (query.has('project')) openProject(() => loadProject({ path: query.get('project') }));
+    else openPath(query.get('path'));
+    return;
   }
+  const saved = autosaved();
+  if (!saved) return;
+  el.restoreText.textContent = `Restore your last session? ${saved.name || 'Untitled'} · ${saved.clips.length} clip${saved.clips.length === 1 ? '' : 's'}`;
+  el.restoreBar.hidden = false;
+  el.restoreBtn.onclick = () => { el.restoreBar.hidden = true; openProject(() => loadProject({ project: saved }), { label: 'Restoring…', quiet: true }); };
+  el.restoreDismissBtn.onclick = () => { el.restoreBar.hidden = true; clearAutosave(); };
 }
 
 init();
-
-// exposed for debugging in the console
-window.ovc = { state, selectedClip, isImage, jobActive };

@@ -2,7 +2,7 @@
 // Sources are stored by path; loading re-registers them with the server. Uploaded files live in the
 // server's temp dir and are gone after a restart, so they may fail to restore.
 import { api } from './api.js';
-import { state, on, addSource, afterEdit, select, emit, totalDuration } from './state.js';
+import { state, on, addSource, afterEdit, select, emit, newId, OUTPUT_VALUES, DEFAULT_MUSIC } from './state.js';
 
 const AUTOSAVE_KEY = 'ovc.project';
 export const PROJECT_VERSION = 1;
@@ -37,56 +37,37 @@ export function downloadProject() {
   setTimeout(() => URL.revokeObjectURL(a.href), 5000);
 }
 
-// Re-registers each source path; returns { map: oldId -> Source, missing: [name] }.
-async function reopenSources(list) {
-  const map = new Map();
-  const missing = [];
-  await Promise.all(list.map(async (s) => {
-    if (!s?.path) { missing.push(s?.name || '?'); return; }
-    // reuse an already registered source with the same path
-    const existing = [...state.sources.values()].find((x) => x.path === s.path);
-    if (existing) { map.set(s.id, existing); return; }
-    try { map.set(s.id, addSource(await api.open(s.path))); } catch { missing.push(s.name || s.path); }
-  }));
-  return { map, missing };
-}
-
-// Loads a project object into the state. Returns { missing: [names], dropped: n }.
-export async function loadProject(data) {
-  if (!data || data.app !== 'OpenVideoChamp' || !Array.isArray(data.clips)) throw new Error('Not an OpenVideoChamp project file');
-  const { map, missing } = await reopenSources(data.sources || []);
-  const clips = [];
-  const transitions = [];
-  let dropped = 0;
-  data.clips.forEach((c, i) => {
-    const src = map.get(c.sourceId);
-    if (!src || src.kind === 'audio') { dropped++; return; }
-    clips.push({ id: c.id || `c${i}`, sourceId: src.id, start: Number(c.start) || 0, end: Number(c.end) || src.duration, volume: Number(c.volume ?? 1), mute: !!c.mute });
-    if (clips.length > 1) {
-      const t = (data.transitions || [])[i - 1];
-      transitions.push(t && t.type ? { type: t.type, duration: Number(t.duration) || 0 } : { type: 'cut', duration: 0 });
-    }
+// Loads a project into the state. `from` is { path } (a file the server can read) or { project } (the
+// parsed file). The server opens the media and hands back the project with its ids; see POST /api/project.
+// Returns { missing: [names], dropped: n }.
+export async function loadProject(from) {
+  const data = await api.project(from);
+  for (const src of data.sources) addSource(src);
+  state.clips = data.clips.map((c) => {
+    const src = state.sources.get(c.sourceId);
+    return { id: newId(), sourceId: src.id, start: Number(c.start) || 0, end: Number(c.end) || src.duration, volume: Number(c.volume ?? 1), mute: !!c.mute };
   });
-  const musicSrc = data.music ? map.get(data.music.sourceId) : null;
-  state.clips = clips;
-  state.transitions = transitions;
-  state.fadeIn = Number(data.fadeIn) || 0;
-  state.fadeOut = Number(data.fadeOut) || 0;
-  state.normalize = !!data.normalize;
-  state.music = musicSrc && musicSrc.hasAudio ? { ...data.music, sourceId: musicSrc.id } : null;
-  state.projectName = data.name || null;
-  if (data.output && typeof data.output === 'object') Object.assign(state.output, data.output);
+  state.transitions = data.transitions.map((t) => (t && t.type && t.type !== 'cut' ? { type: t.type, duration: Number(t.duration) || 0 } : { type: 'cut', duration: 0 }));
+  state.fadeIn = data.fadeIn;
+  state.fadeOut = data.fadeOut;
+  state.normalize = data.normalize;
+  state.music = data.music ? { ...DEFAULT_MUSIC, ...data.music } : null;
+  state.projectName = data.name;
+  const out = data.output || {};
+  for (const [key, allowed] of Object.entries(OUTPUT_VALUES)) if (allowed.includes(String(out[key]))) state.output[key] = String(out[key]);
+  if (typeof out.encoder === 'string') state.output.encoder = out.encoder;
+  if (Number(out.targetMB) >= 1) state.output.targetMB = Number(out.targetMB);
+  state.selection = null;
   afterEdit({ structural: true });
   emit('output');
-  select(clips.length ? { kind: 'clip', index: 0 } : null);
-  return { missing, dropped };
+  select(state.selection);
+  return { missing: data.missing, dropped: data.dropped };
 }
 
 export async function loadProjectFile(file) {
-  const text = await file.text();
-  let data;
-  try { data = JSON.parse(text); } catch { throw new Error('That file is not valid JSON'); }
-  return loadProject(data);
+  let project;
+  try { project = JSON.parse(await file.text()); } catch { throw new Error('That file is not valid JSON'); }
+  return loadProject({ project });
 }
 
 // ---------- autosave ----------
@@ -114,5 +95,3 @@ export function initProject() {
   on('output', autosave);
   window.addEventListener('beforeunload', autosave);
 }
-
-export { totalDuration };

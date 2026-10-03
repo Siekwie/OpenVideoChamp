@@ -7,7 +7,7 @@ for (const id of ['cardDialog', 'cardForm', 'cardCanvas', 'cardTitle', 'cardSubt
 
 const W = 1920, H = 1080;
 let logo = null; // HTMLImageElement
-let onAdd = () => {};
+let onAdd = () => {}, onError = () => {};
 
 function fitFont(ctx, text, weight, maxWidth, maxPx, minPx) {
   let px = maxPx;
@@ -34,7 +34,7 @@ export function drawCard(canvas, opts) {
 
   const left = opts.style === 'left' || opts.style === 'bar';
   const margin = 160;
-  const maxWidth = W - margin * 2 - (logo && opts.useLogo ? 0 : 0);
+  const maxWidth = W - margin * 2;
   ctx.textAlign = left ? 'left' : 'center';
   ctx.textBaseline = 'alphabetic';
   const x = left ? margin : W / 2;
@@ -102,18 +102,20 @@ async function submit(e) {
   const stem = (o.title || 'title card').replace(/[^\w\- ]+/g, '').trim().slice(0, 40) || 'title card';
   el.cardAddBtn.disabled = true;
   try {
-    const src = await upload(blob, `${stem}.png`);
+    // card: the server keeps the image, so a saved project still finds it after a restart
+    const src = await upload(blob, `${stem}.png`, { card: true });
     el.cardDialog.close();
     onAdd(src, o.seconds);
   } catch (err) {
-    alert(err.message);
+    onError(err.message);
   } finally {
     el.cardAddBtn.disabled = false;
   }
 }
 
-export function initTitleCard(handler) {
-  onAdd = handler;
+export function initTitleCard({ add, error }) {
+  onAdd = add;
+  onError = error;
   for (const id of ['cardTitle', 'cardSubtitle', 'cardBg', 'cardFg', 'cardAccent', 'cardStyle']) el[id].addEventListener('input', preview);
   el.cardLogo.addEventListener('change', () => {
     if (el.cardLogo.checked && !logo) el.cardLogoFile.click();
@@ -123,8 +125,8 @@ export function initTitleCard(handler) {
     const f = el.cardLogoFile.files[0];
     if (!f) { el.cardLogo.checked = false; preview(); return; }
     const img = new Image();
-    img.onload = () => { logo = img; el.cardLogo.checked = true; preview(); };
-    img.onerror = () => { el.cardLogo.checked = false; preview(); };
+    img.onload = () => { URL.revokeObjectURL(img.src); logo = img; el.cardLogo.checked = true; preview(); };
+    img.onerror = () => { URL.revokeObjectURL(img.src); el.cardLogo.checked = false; preview(); };
     img.src = URL.createObjectURL(f);
     el.cardLogoFile.value = '';
   });

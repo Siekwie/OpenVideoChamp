@@ -12,12 +12,11 @@ export const api = {
   info: () => fetch('/api/info').then(json),
   docs: () => fetch('/api/docs').then((r) => { if (!r.ok) throw new Error('docs'); return r.text(); }),
   open: (path) => post('/api/open', { path }).then(json),
-  openDialog: () => post('/api/open/dialog').then(json),
-  sources: () => fetch('/api/sources').then(json),
+  openDialog: (multiple) => post('/api/open/dialog', { multiple }).then(json),
+  project: (body) => post('/api/project', body).then(json),
   keyframes: (id) => fetch(`/api/sources/${id}/keyframes`).then(json),
   plan: (body, signal) => fetch('/api/plan', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal }).then(json),
   export: (body) => post('/api/export', body).then(json),
-  job: (id) => fetch(`/api/jobs/${id}`).then(json),
   cancel: (id) => post(`/api/jobs/${id}/cancel`).then(json),
   reveal: (id) => post(`/api/jobs/${id}/reveal`).then(json),
   streamUrl: (sourceId) => `/api/sources/${sourceId}/stream`,
@@ -25,11 +24,11 @@ export const api = {
   downloadUrl: (jobId) => `/api/jobs/${jobId}/download`,
 };
 
-// PUT /api/upload with progress; resolves to the Source. `onProgress(0..1)`.
-export function upload(file, name, onProgress) {
-  const xhr = new XMLHttpRequest();
-  const promise = new Promise((resolve, reject) => {
-    xhr.open('PUT', `/api/upload?name=${encodeURIComponent(name || file.name || 'upload')}`);
+// PUT /api/upload with progress; resolves to the Source. `onProgress(0..1)`; `card` keeps the file as a title card.
+export function upload(file, name, { onProgress, card = false } = {}) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', `/api/upload?name=${encodeURIComponent(name || file.name || 'upload')}${card ? '&card=1' : ''}`);
     xhr.upload.onprogress = (e) => { if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total); };
     xhr.onload = () => {
       let data = {};
@@ -38,11 +37,8 @@ export function upload(file, name, onProgress) {
       else resolve(data);
     };
     xhr.onerror = () => reject(new Error('Upload failed: cannot reach the server'));
-    xhr.onabort = () => reject(Object.assign(new Error('Upload cancelled'), { aborted: true }));
     xhr.send(file);
   });
-  promise.abort = () => xhr.abort();
-  return promise;
 }
 
 // Follows a job over SSE (falls back to polling) and calls onUpdate with every Job JSON.

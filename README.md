@@ -28,6 +28,8 @@ What it does:
   rate control when a size target is set.
 - **Projects**: save/open `.ovc.json` files, automatic session restore, undo/redo,
   and a CLI that renders a project headlessly.
+- **Scriptable**: everything goes through a local JSON API, so a script or an
+  AI agent can open files, make title cards, build the sequence and export.
 
 ## Install and run
 
@@ -38,30 +40,35 @@ point `OVC_FFMPEG` / `OVC_FFPROBE` at your own.
     npm install
     npm start                 # http://127.0.0.1:4455, opens your browser
 
-To open the UI with a file already loaded:
+To open the UI with a file or a saved project already loaded:
 
     npm start -- some-clip.mp4
+    npm start -- trailer.ovc.json
 
-Options: `--port 4455` (or `OVC_PORT`), `--no-open`. (`npx openvideochamp`
+Options: `--port 4455` (or `OVC_PORT`), `--no-open`. Exports of dropped files
+and the title cards you make go to `~/Videos/OpenVideoChamp` (`OVC_OUTPUT_DIR`
+changes that). (`npx openvideochamp`
 will work the same way once the package is published to npm.)
 
 ## Making a trailer
 
 1. **Add** your recordings, screenshots and a music track: drop them on the
-   window, or use *Add → Media file…*. Audio files become the music track;
-   *Add → Title card…* renders a text card (title, subtitle, colours, optional
-   logo) that you can place anywhere in the sequence.
+   window, or use *Add → Media files…* (pick several at once). Audio files
+   become the music track; *Add → Title card…* renders a text card (title,
+   subtitle, colours, optional logo) that you can place anywhere in the sequence.
 2. Select a clip and drag the **in / out** handles on the filmstrip, or press
    `I` / `O` at the playhead. `S` splits a long recording so you can keep several
    moments from it and delete the rest.
 3. Drag clips in the **sequence** strip to reorder them. Click the marker
-   between two clips to choose a **transition** and its length; *Apply to all*
-   makes the whole trailer consistent.
-4. In the panel on the right, set the **fade in / out**, the **music** volume
-   and mix mode, and tick **normalize loudness**. Press `P` for a draft preview.
+   between two clips to choose a **transition** and its length (double-click
+   for a quick crossfade); *Apply to all* makes the whole trailer consistent.
+4. Click the **music** bar under the clips for its volume, fades and mix mode.
+   *Whole video* in the panel on the right has the **fade in / out** and
+   **normalize loudness**. Press `P` for a draft preview.
 5. Pick **Steam** (or a Discord size) at the bottom and press **Export**. The
-   file lands next to your first clip (or in `~/Videos/OpenVideoChamp` for
-   dropped files) and is never overwritten.
+   line under the estimate says where the file will be saved: next to your
+   first clip (or in `~/Videos/OpenVideoChamp` for dropped files and title
+   cards). Nothing is ever overwritten.
 
 ## CLI
 
@@ -84,15 +91,17 @@ In the UI (`?` shows them all):
 - Space: play / pause · I / O: set in / out point at the playhead
 - Left / Right: step one frame; Shift+Left / Shift+Right: one second
 - Home / End: jump to the in / out point
-- S: split the clip at the playhead · D: duplicate · Delete: remove
+- S: split the clip at the playhead · D: duplicate · Delete: remove the selected clip, transition or music
 - , / . : previous / next clip · Alt+Left / Alt+Right: move the clip
 - Ctrl+Z / Ctrl+Shift+Z: undo / redo · Ctrl+S: save the project
-- P: render a draft preview · Enter: export · Esc: cancel the running export
+- P: render and play a draft preview · Enter: export · Esc: cancel the running export
 
 ## Local API for agents
 
 Everything the UI does goes through `http://127.0.0.1:4455/api/...`. The
 contract is in [docs/API.md](docs/API.md) and is also served by the running
-instance at `GET /api/docs` (text/markdown), so a script or an agent can open
-files, describe a sequence (clips, transitions, music, fades), ask for a plan,
-start an export or a preview and follow its progress over SSE.
+instance at `GET /api/docs` (text/markdown; *Project → Copy agent
+instructions* puts it on the clipboard), so a script or an agent can open
+files, render title cards, open a saved project, describe a sequence (clips,
+transitions, music, fades), ask for a plan, start an export or a preview and
+follow its progress over SSE.

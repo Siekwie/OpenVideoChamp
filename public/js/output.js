@@ -2,10 +2,11 @@
 import { $, fmtMB, fmtEta, basename } from './util.js';
 import { api, followJob } from './api.js';
 import { state, on, emit, setOutput, exportRequest, copyCandidate, jobActive, anyJobActive, setMonitorMode } from './state.js';
+import { playPreview } from './monitor.js';
 
 const el = {};
 for (const id of ['presets', 'customWrap', 'targetMB', 'cutWrap', 'optCut', 'optResolution', 'optFps', 'optAudio', 'speedWrap', 'optSpeed', 'encoderWrap', 'optEncoder',
-  'estimate', 'previewBtn', 'previewProgress', 'previewFill', 'previewText', 'exportBtn', 'progress', 'progressFill', 'progressText', 'cancelBtn',
+  'estimate', 'savesTo', 'previewBtn', 'previewProgress', 'previewFill', 'previewText', 'exportBtn', 'progress', 'progressFill', 'progressText', 'cancelBtn',
   'resultRow', 'resultText', 'revealBtn', 'downloadBtn', 'dismissResultBtn', 'logDetails', 'logPre']) el[id] = $(id);
 
 let planTimer = 0, planAbort = null, exportWhenPlanned = false;
@@ -34,16 +35,20 @@ export function renderOptions() {
 
 // ---------- plan ----------
 
-export function renderEstimate() {
+function renderEstimate() {
   const box = el.estimate;
   box.textContent = '';
   const add = (text, cls) => { const s = document.createElement('span'); if (cls) s.className = cls; s.textContent = text; box.appendChild(s); };
-  if (!state.clips.length) { add('Add a clip to see the export estimate.', 'muted'); return; }
-  if (state.planPending && !state.plan) return add('…');
+  const plan = state.clips.length && !state.planError ? state.plan : null;
+  el.savesTo.hidden = !plan;
+  if (!state.clips.length) return add('Add a clip to see the export estimate.', 'muted');
   if (state.planError) return add(state.planError, 'err');
-  if (!state.plan) return;
-  add(state.plan.summary + (state.planPending ? ' …' : ''));
-  for (const w of state.plan.warnings || []) add(w, 'warn');
+  if (!plan) return add('…');
+  add(plan.summary + (state.planPending ? ' …' : ''));
+  for (const w of plan.warnings || []) add(w, 'warn');
+  const name = basename(plan.outputPath);
+  el.savesTo.textContent = `Saves as ${name} in ${plan.outputPath.slice(0, -name.length - 1)}`;
+  el.savesTo.title = plan.outputPath;
 }
 
 export function requestPlan() {
@@ -76,7 +81,7 @@ export function requestPlan() {
 
 // ---------- jobs ----------
 
-export function exportEnabled() {
+function exportEnabled() {
   return !!(state.clips.length && state.plan && !state.planPending && !state.planError && !anyJobActive());
 }
 
@@ -100,8 +105,8 @@ export function renderJobs() {
   el.exportBtn.disabled = !exportEnabled();
   el.progress.hidden = !exporting;
   el.previewBtn.hidden = previewing;
-  el.previewBtn.disabled = !exportEnabled() || !!(state.preview && !state.preview.stale && state.monitorMode === 'preview');
-  el.previewBtn.textContent = state.preview?.stale ? 'Re-render preview' : 'Preview';
+  el.previewBtn.disabled = !exportEnabled();
+  el.previewBtn.textContent = state.preview?.stale ? 'Update preview' : 'Preview';
   el.previewProgress.hidden = !previewing;
   el.cancelBtn.hidden = !exporting && !previewing;
   if (exporting) progressInto(el.progressFill, el.progressText, exp, 'Exporting');
@@ -112,11 +117,13 @@ export function renderJobs() {
   if (!job) return;
   el.resultRow.className = `row result-row ${job.status}`;
   const done = job.status === 'done';
+  el.resultText.title = done ? job.outputPath : '';
   el.revealBtn.hidden = !done;
   el.downloadBtn.hidden = !done;
   el.logDetails.hidden = !(job.status === 'error' && job.log);
   if (done) {
-    el.resultText.textContent = ['Exported', job.outputBytes != null ? fmtMB(job.outputBytes) : null, basename(job.outputPath), job.outputPath !== basename(job.outputPath) ? `in ${job.outputPath.slice(0, -basename(job.outputPath).length)}` : null].filter(Boolean).join(' · ');
+    const name = basename(job.outputPath);
+    el.resultText.textContent = [`Exported ${name}`, job.outputBytes != null ? fmtMB(job.outputBytes) : null, job.outputPath.slice(0, -name.length - 1)].filter(Boolean).join(' · ');
     el.downloadBtn.href = api.downloadUrl(job.id);
     el.downloadBtn.setAttribute('download', basename(job.outputPath) || 'export.mp4');
   } else if (job.status === 'error') {
@@ -154,24 +161,30 @@ export async function startExport() {
     if (!state.job || state.job.id !== id) return;
     state.job = job;
     renderJobs();
-    if (!jobActive(job)) emit('job-done', job);
+    if (jobActive(job)) return;
+    emit('job-done', job);
+    requestPlan(); // the name just written is taken now; show what the next export would be called
   });
 }
 
+// Renders the draft and plays it; a draft that is still up to date is just played again.
 export async function startPreview() {
+  if (jobActive(state.previewJob)) return;
+  if (state.preview && !state.preview.stale) { setMonitorMode('preview'); playPreview(); return; }
   if (!exportEnabled()) return;
   if (stopPreview) stopPreview();
   state.previewJob = { id: null, status: 'queued', progress: 0, preview: true };
   renderJobs();
+  const revision = state.revision;
   const id = await runJob(exportRequest({ preview: true }), (j) => { state.previewJob = j; });
   if (!id) return;
   stopPreview = followJob(id, (job) => {
     if (!state.previewJob || state.previewJob.id !== id) return;
     state.previewJob = job;
     if (job.status === 'done') {
-      state.preview = { jobId: job.id, url: api.jobStreamUrl(job.id), duration: job.plan?.duration || 0, stale: false };
-      setMonitorMode('preview');
-      emit('monitor');
+      state.preview = { jobId: job.id, url: api.jobStreamUrl(job.id), duration: job.plan?.duration || 0, stale: state.revision !== revision };
+      if (state.monitorMode === 'preview') emit('monitor'); else setMonitorMode('preview');
+      playPreview();
     }
     renderJobs();
   });
@@ -180,8 +193,6 @@ export async function startPreview() {
 export function cancelJobs() {
   for (const j of [state.job, state.previewJob]) if (jobActive(j) && j.id) api.cancel(j.id).catch(() => {});
 }
-
-export function anyRunning() { return anyJobActive(); }
 
 // ---------- wiring ----------
 
@@ -216,6 +227,7 @@ export function initOutput() {
   on('sequence', () => { renderOptions(); requestPlan(); });
   on('sources', renderOptions);
   on('monitor', renderJobs);
+  on('selection', renderJobs); // selecting a clip leaves the preview, which changes what the Preview button does
   on('info', () => {
     const encoders = state.info?.encoders || [];
     el.optEncoder.replaceChildren(...['auto', ...encoders].map((name) => { const o = document.createElement('option'); o.value = name; o.textContent = name === 'auto' ? 'Auto' : name; return o; }));
@@ -223,6 +235,4 @@ export function initOutput() {
     renderOptions();
   });
   renderOptions();
-  renderEstimate();
-  renderJobs();
 }

@@ -3,6 +3,7 @@ import { clamp, round3, MIN_LEN } from './util.js';
 
 export const DEFAULT_IMAGE_SECONDS = 4;
 export const DEFAULT_TRANSITION = 0.5;
+export const DEFAULT_MUSIC = { start: 0, volume: 0.5, fadeIn: 1, fadeOut: 2, loop: true, mode: 'mix' };
 export const MAX_FADE = 30;
 export const OUTPUT_VALUES = {
   preset: ['cut', 'discord', 'discord50', 'discord500', 'steam', 'custom'],
@@ -23,14 +24,14 @@ export const state = {
   music: null,                 // { sourceId, start, volume, fadeIn, fadeOut, loop, mode }
   normalize: false,
   output: { preset: 'steam', targetMB: 10, cut: 'fast', resolution: 'auto', fps: 'auto', audio: 'keep', speed: 'balanced', encoder: 'auto' },
-  selection: null,             // { kind: 'clip' | 'transition', index }
+  projectName: null,           // set by an opened project; otherwise the first clip's name is used
+  revision: 0,                 // counts edits, so a finished preview render knows whether it is already out of date
+  selection: null,             // { kind: 'clip' | 'transition', index } or { kind: 'music' }
   plan: null, planError: null, planPending: false,
   job: null,                   // export job (Job JSON, or a local stub)
   previewJob: null,            // preview render job
   preview: null,               // { jobId, url, duration, stale }
   monitorMode: 'source',       // 'source' | 'preview'
-  uploads: [],                 // { name, progress }
-  dirty: false,
 };
 
 // ---------- event bus ----------
@@ -52,7 +53,6 @@ const undoStack = [], redoStack = [];
 const snapshot = () => JSON.stringify(Object.fromEntries(SNAPSHOT_KEYS.map((k) => [k, state[k]])));
 function restore(snap) {
   Object.assign(state, JSON.parse(snap));
-  fixSelection();
   afterEdit({ structural: true });
 }
 export function canUndo() { return undoStack.length > 0; }
@@ -78,7 +78,8 @@ export function edit(fn, opts) {
 
 export function afterEdit({ structural = false } = {}) {
   normalizeSequence();
-  state.dirty = true;
+  fixSelection();
+  state.revision++;
   if (state.preview) state.preview.stale = true;
   emit('sequence', { structural });
 }
@@ -134,20 +135,25 @@ export function normalizeSequence() {
       if (max < 0.1) { t.type = 'cut'; t.duration = 0; } else if (t.duration > max) t.duration = round3(max);
     });
   }
-  const total = totalDuration();
-  if (state.fadeIn + state.fadeOut > total) {
-    const scale = total / (state.fadeIn + state.fadeOut || 1);
-    state.fadeIn = round3(state.fadeIn * scale);
-    state.fadeOut = round3(state.fadeOut * scale);
-  }
   if (state.music && !state.sources.has(state.music.sourceId)) state.music = null;
+  // A pair of fades can never be longer than the video; shrink both in proportion.
+  const total = totalDuration();
+  for (const fades of [state, state.music]) {
+    if (!fades || fades.fadeIn + fades.fadeOut <= total) continue;
+    const scale = total / (fades.fadeIn + fades.fadeOut);
+    fades.fadeIn = Math.floor(fades.fadeIn * scale * 1000) / 1000;
+    fades.fadeOut = Math.floor(fades.fadeOut * scale * 1000) / 1000;
+  }
 }
 
+// Something is always selected while there are clips, and the selection always points at something that exists.
 function fixSelection() {
   const s = state.selection;
-  if (!s) return;
+  const first = state.clips.length ? { kind: 'clip', index: 0 } : null;
+  if (!s || !first) { state.selection = first; return; }
+  if (s.kind === 'music') return;
   const max = s.kind === 'clip' ? state.clips.length : state.transitions.length;
-  if (!max) state.selection = state.clips.length ? { kind: 'clip', index: 0 } : null;
+  if (!max) state.selection = first;
   else if (s.index >= max) s.index = max - 1;
 }
 
@@ -183,22 +189,23 @@ export function setMonitorMode(mode) {
 
 // ---------- clip operations ----------
 
-function makeClip(src, start, end) {
-  if (src.kind === 'image') return { id: newId(), sourceId: src.id, start: 0, end: DEFAULT_IMAGE_SECONDS, volume: 1, mute: false };
-  return { id: newId(), sourceId: src.id, start: start ?? 0, end: end ?? src.duration, volume: 1, mute: false };
+function makeClip(src, seconds) {
+  if (src.kind === 'image') return { id: newId(), sourceId: src.id, start: 0, end: seconds ?? DEFAULT_IMAGE_SECONDS, volume: 1, mute: false };
+  return { id: newId(), sourceId: src.id, start: 0, end: src.duration, volume: 1, mute: false };
 }
 
-// Appends (or inserts after the selection) a clip covering the whole source; returns its index.
-export function addClip(src, { at, select: doSelect = true, start, end } = {}) {
+// Inserts a clip covering the whole source after the selected clip (or at the end); returns its index.
+// `seconds` is how long a still image is shown.
+export function addClip(src, { seconds } = {}) {
   if (src.kind === 'audio') return -1;
   let index = -1;
   edit(() => {
-    const clip = makeClip(src, start, end);
-    index = at ?? (selectedIndex() >= 0 ? selectedIndex() + 1 : state.clips.length);
+    const clip = makeClip(src, seconds);
+    index = selectedIndex() >= 0 ? selectedIndex() + 1 : state.clips.length;
     state.clips.splice(index, 0, clip);
     if (state.clips.length > 1) state.transitions.splice(Math.max(0, index - 1), 0, { type: 'cut', duration: 0 });
   }, { structural: true });
-  if (doSelect) selectClip(index);
+  selectClip(index);
   return index;
 }
 
@@ -209,7 +216,6 @@ export function removeClip(index) {
     // drop the transition that followed the clip (or the one before it for the last clip)
     if (state.transitions.length) state.transitions.splice(Math.min(index, state.transitions.length - 1), 1);
   }, { structural: true });
-  fixSelection();
   selectClip(Math.min(index, state.clips.length - 1));
 }
 
@@ -302,6 +308,8 @@ export function loadOutputOptions() {
 }
 
 export function setOutput(patch) {
+  // The draft preview only depends on one output option: whether there is sound at all.
+  if (state.preview && 'audio' in patch && patch.audio !== state.output.audio) state.preview.stale = true;
   Object.assign(state.output, patch);
   try { localStorage.setItem('ovc.output', JSON.stringify(state.output)); } catch { /* ignore */ }
   emit('output');

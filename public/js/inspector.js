@@ -1,9 +1,8 @@
-// Right-hand panel: the selected clip or transition, and the sequence-wide audio/fade settings.
-import { $, h, fmtTime, fmtSec, fmtShort, fmtFps, parseTime, clamp, round3 } from './util.js';
-import { state, on, source, clipSource, clipLength, selectedIndex, isImage, maxTransition, checkpoint, afterEdit, edit, setClipRange, setTransition, setAllTransitions,
-  setMusic, setSequenceField, removeClip, duplicateClip, moveClip, select, selectClip, totalDuration, DEFAULT_TRANSITION, MAX_FADE } from './state.js';
+// Right-hand panel: the selected clip, transition or music track, and the settings of the whole video.
+import { $, h, fmtTime, fmtSec, fmtShort, fmtFps, parseTime, clamp, round3, MIN_LEN } from './util.js';
+import { state, on, source, clipSource, clipLength, isImage, maxTransition, checkpoint, afterEdit, edit, setClipRange, setTransition, setAllTransitions,
+  setMusic, setSequenceField, removeClip, duplicateClip, moveClip, selectClip, totalDuration, DEFAULT_TRANSITION, DEFAULT_MUSIC, MAX_FADE } from './state.js';
 import { availableGroups } from './transitions.js';
-import { splitAtPlayhead } from './monitor.js';
 
 const el = { itemPanel: $('itemPanel'), sequencePanel: $('sequencePanel') };
 let handlers = { addMusic: () => {} };
@@ -72,8 +71,8 @@ function clipPanel(i) {
     kids.push(field('Shown for', seconds({ value: clipLength(c), min: 0.1, max: 600, step: 0.5, onChange: (v) => edit(() => setClipRange(c, 0, v)) })));
   } else {
     const row = h('div', { class: 'fieldrow' },
-      field('In', timeInput(c.start, (t) => edit(() => setClipRange(c, Math.min(t, c.end - 0.101), c.end)))),
-      field('Out', timeInput(c.end, (t) => edit(() => setClipRange(c, c.start, Math.max(t, c.start + 0.101))))),
+      field('In', timeInput(c.start, (t) => edit(() => setClipRange(c, Math.min(t, c.end - MIN_LEN), c.end)))),
+      field('Out', timeInput(c.end, (t) => edit(() => setClipRange(c, c.start, Math.max(t, c.start + MIN_LEN))))),
       field('Length', h('span', { class: 'fieldvalue num', text: fmtSec(clipLength(c)) })));
     kids.push(row);
     kids.push(field('Volume', slider({
@@ -85,10 +84,9 @@ function clipPanel(i) {
     kids.push(h('label', { class: 'check' }, mute, 'Mute this clip'));
   }
   kids.push(h('div', { class: 'actions' },
-    !image ? h('button', { type: 'button', class: 'small', text: 'Split at playhead', title: 'S', onclick: () => splitAtPlayhead() }) : null,
-    h('button', { type: 'button', class: 'small', text: 'Duplicate', title: 'D', onclick: () => duplicateClip(i) }),
-    h('button', { type: 'button', class: 'small', text: '← Earlier', disabled: i === 0 || null, title: 'Alt+←', onclick: () => moveClip(i, i - 1) }),
-    h('button', { type: 'button', class: 'small', text: 'Later →', disabled: i === n - 1 || null, title: 'Alt+→', onclick: () => moveClip(i, i + 1) })));
+    h('button', { type: 'button', class: 'small', text: 'Duplicate', title: 'Duplicate this clip (D)', onclick: () => duplicateClip(i) }),
+    h('button', { type: 'button', class: 'small', text: '← Earlier', disabled: i === 0 || null, title: 'Move earlier in the sequence (Alt+←)', onclick: () => moveClip(i, i - 1) }),
+    h('button', { type: 'button', class: 'small', text: 'Later →', disabled: i === n - 1 || null, title: 'Move later in the sequence (Alt+→)', onclick: () => moveClip(i, i + 1) })));
   return kids;
 }
 
@@ -130,36 +128,38 @@ function transitionPanel(i) {
   return kids;
 }
 
-// ---------- sequence-wide ----------
+// ---------- music ----------
 
-function musicBlock() {
+function musicPanel() {
   const m = state.music;
-  const musicSources = [...state.sources.values()].filter((s) => s.hasAudio && s.id !== m?.sourceId);
-  const picker = h('select', { class: 'musicpick' }, h('option', { value: '', text: m ? 'Replace with…' : 'Choose a track…' }),
+  const others = [...state.sources.values()].filter((x) => x.hasAudio && x.id !== m?.sourceId);
+  const picker = h('select', { class: 'musicpick' }, h('option', { value: '', text: m ? 'Use another track…' : 'Choose a track…' }),
     h('option', { value: '__file', text: 'Music file…' }),
-    ...musicSources.map((s) => h('option', { value: s.id, text: `${s.name} (${fmtShort(s.duration)})` })));
+    ...others.map((x) => h('option', { value: x.id, text: `${x.name} (${fmtShort(x.duration)})` })));
   picker.addEventListener('change', () => {
     const v = picker.value;
     picker.value = '';
     if (v === '__file') handlers.addMusic();
-    else if (v) setMusic({ sourceId: v, start: 0, volume: m?.volume ?? 0.5, fadeIn: m?.fadeIn ?? 1, fadeOut: m?.fadeOut ?? 2, loop: m?.loop ?? true, mode: m?.mode ?? 'mix' });
+    else if (v) setMusic({ ...DEFAULT_MUSIC, ...m, sourceId: v, start: 0 });
   });
   if (!m) {
-    return [h('div', { class: 'subhead' }, h('h3', { text: 'Music' })),
-      h('p', { class: 'muted small', text: 'Lay a track under the whole sequence. It is faded, looped if too short and mixed with the clip audio.' }),
-      picker];
+    return [
+      h('div', { class: 'panelhead' }, h('h2', { text: 'Music' })),
+      h('p', { class: 'muted', text: 'Lay a track under the whole sequence. It is faded in and out, looped if it is too short, and mixed with the sound of the clips.' }),
+      picker,
+    ];
   }
   const src = source(m.sourceId);
   const total = totalDuration();
   const patch = (p) => setMusic({ ...state.music, ...p });
   const mode = h('div', { class: 'seg small' },
-    h('button', { type: 'button', 'aria-checked': String(m.mode === 'mix'), text: 'Under the clips', title: 'Mix with the clip audio', onclick: () => patch({ mode: 'mix' }) }),
-    h('button', { type: 'button', 'aria-checked': String(m.mode === 'replace'), text: 'Music only', title: 'Drop all clip audio', onclick: () => patch({ mode: 'replace' }) }));
+    h('button', { type: 'button', 'aria-checked': String(m.mode === 'mix'), text: 'Under the clips', title: 'Mix with the sound of the clips', onclick: () => patch({ mode: 'mix' }) }),
+    h('button', { type: 'button', 'aria-checked': String(m.mode === 'replace'), text: 'Music only', title: 'Drop the sound of the clips', onclick: () => patch({ mode: 'replace' }) }));
   const loop = h('input', { type: 'checkbox', checked: m.loop || null });
   loop.addEventListener('change', () => patch({ loop: loop.checked }));
-  const shortNote = src && !m.loop && src.duration - m.start < total ? `The track ends ${fmtSec(total - (src.duration - m.start), 1)} before the video; silence follows (or tick Loop).` : null;
+  const left = src ? src.duration - m.start : 0;
   return [
-    h('div', { class: 'subhead' }, h('h3', { text: 'Music' }), h('button', { type: 'button', class: 'small danger', text: 'Remove', onclick: () => setMusic(null) })),
+    h('div', { class: 'panelhead' }, h('h2', { text: 'Music' }), h('button', { type: 'button', class: 'small danger', text: 'Remove', title: 'Remove the music (Delete)', onclick: () => setMusic(null) })),
     h('div', { class: 'sourceline' }, h('span', { class: 'sourcename', text: src?.name || '?' }), h('span', { class: 'muted', text: srcMeta(src) })),
     field('Volume', slider({
       min: 0, max: 150, step: 1, value: Math.round(m.volume * 100), format: (v) => `${v}%`,
@@ -171,10 +171,13 @@ function musicBlock() {
       field('Fade in', seconds({ value: m.fadeIn, onChange: (v) => patch({ fadeIn: v }) })),
       field('Fade out', seconds({ value: m.fadeOut, onChange: (v) => patch({ fadeOut: v }) }))),
     h('label', { class: 'check' }, loop, 'Loop if the track is shorter than the video'),
-    shortNote ? h('p', { class: 'warn small', text: shortNote }) : null,
+    !m.loop && left < total ? h('p', { class: 'warn', text: `The track ends ${fmtSec(total - left, 1)} before the video does. Tick Loop, or the rest is silent.` }) : null,
+    state.output.audio === 'mute' ? h('p', { class: 'warn', text: 'Audio is set to None below, so the export will have no music.' }) : null,
     picker,
   ];
 }
+
+// ---------- whole video ----------
 
 function sequencePanel() {
   if (!state.clips.length) return [];
@@ -184,13 +187,11 @@ function sequencePanel() {
   return [
     h('div', { class: 'panelhead' }, h('h2', { text: 'Whole video' }), h('span', { class: 'muted num', text: fmtShort(total) })),
     h('div', { class: 'fieldrow' },
-      field('Fade in from black', seconds({ value: state.fadeIn, max: Math.min(MAX_FADE, total), onChange: (v) => setSequenceField('fadeIn', v) })),
-      field('Fade out to black', seconds({ value: state.fadeOut, max: Math.min(MAX_FADE, total), onChange: (v) => setSequenceField('fadeOut', v) }))),
-    h('p', { class: 'fieldhint', text: 'Fades apply to picture and sound together.' }),
-    ...musicBlock(),
-    h('div', { class: 'subhead' }, h('h3', { text: 'Loudness' })),
-    h('label', { class: 'check' }, normalize, 'Normalize to −14 LUFS (streaming loudness)'),
-    h('p', { class: 'fieldhint', text: 'Evens out quiet and loud parts so the trailer sounds like other store videos. Slightly slower export.' }),
+      field('Fade in', seconds({ value: state.fadeIn, max: Math.min(MAX_FADE, total), onChange: (v) => setSequenceField('fadeIn', v) })),
+      field('Fade out', seconds({ value: state.fadeOut, max: Math.min(MAX_FADE, total), onChange: (v) => setSequenceField('fadeOut', v) }))),
+    h('p', { class: 'fieldhint', text: 'From and to black; the sound fades with the picture.' }),
+    h('label', { class: 'check' }, normalize, 'Normalize loudness'),
+    h('p', { class: 'fieldhint', text: 'Evens the sound out to −14 LUFS, the level of other store videos. Exports a little slower.' }),
   ];
 }
 
@@ -214,8 +215,8 @@ function renderNow() {
   let kids;
   if (!state.clips.length) kids = [h('div', { class: 'emptypanel' }, h('h2', { text: 'Nothing here yet' }), h('p', { class: 'muted', text: 'Add a video to start. Each clip you add appears in the sequence below; select one to trim it here.' }))];
   else if (sel?.kind === 'transition') kids = transitionPanel(sel.index);
-  else if (sel?.kind === 'clip') kids = clipPanel(sel.index);
-  else kids = [h('p', { class: 'muted', text: 'Select a clip in the sequence.' })];
+  else if (sel?.kind === 'music') kids = musicPanel();
+  else kids = clipPanel(sel?.index ?? 0);
   el.itemPanel.replaceChildren(...kids.filter(Boolean));
   el.sequencePanel.replaceChildren(...sequencePanel().filter(Boolean));
   el.sequencePanel.hidden = !state.clips.length;
@@ -226,4 +227,5 @@ export function initInspector() {
   on('selection', renderInspector);
   on('sources', renderInspector);
   on('info', renderInspector);
+  on('output', () => { if (state.selection?.kind === 'music') renderInspector(); });
 }

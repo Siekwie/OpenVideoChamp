@@ -1,20 +1,19 @@
-// The sequence strip: one block per clip, markers between them for transitions, drag to reorder.
+// The sequence strip: one block per clip, markers between them for transitions, drag to reorder,
+// and the music lane underneath.
 import { $, h, clamp, fmtShort, fmtSec, sizeCanvas, drawCover } from './util.js';
-import { state, on, clipSource, clipLength, clipOffsets, totalDuration, selectClip, select, moveClip, isImage, canUndo, canRedo, undo, redo } from './state.js';
+import { state, on, source, clipSource, clipLength, clipOffsets, totalDuration, selectClip, select, moveClip, setTransition, isImage, canUndo, canRedo, undo, redo,
+  DEFAULT_TRANSITION } from './state.js';
+import { api } from './api.js';
 import { thumbAt, seek } from './monitor.js';
 import { transitionLabel } from './transitions.js';
 
 const el = {};
-for (const id of ['seqStrip', 'seqClips', 'seqAddBtn', 'seqPlayhead', 'seqInfo', 'undoBtn', 'redoBtn']) el[id] = $(id);
+for (const id of ['seqStrip', 'seqClips', 'seqAddBtn', 'musicLane', 'seqPlayhead', 'seqInfo', 'undoBtn', 'redoBtn']) el[id] = $(id);
 
 let drag = null;
-let onAdd = () => {};
-let onTransitionDblClick = () => {};
+const handlers = { add: () => {}, addMusic: () => {} };
 
-export function setSequenceHandlers({ add, transitionDblClick }) {
-  if (add) onAdd = add;
-  if (transitionDblClick) onTransitionDblClick = transitionDblClick;
-}
+export function setSequenceHandlers(h2) { Object.assign(handlers, h2); }
 
 function clipBlock(c, i) {
   const src = clipSource(c);
@@ -60,7 +59,7 @@ function drawClipThumb(canvas, c, src) {
 
 const images = new Map();
 function imageCache(src) {
-  if (!images.has(src.id)) { const img = new Image(); img.src = `/api/sources/${src.id}/stream`; images.set(src.id, img); }
+  if (!images.has(src.id)) { const img = new Image(); img.src = api.streamUrl(src.id); images.set(src.id, img); }
   return images.get(src.id);
 }
 
@@ -71,10 +70,30 @@ function transitionMarker(t, i) {
     type: 'button',
     class: `tr${cut ? ' cut' : ' active'}${selected ? ' selected' : ''}`,
     dataset: { index: i },
-    title: cut ? 'Hard cut · click to add a transition' : `${transitionLabel(t.type)} · ${fmtSec(t.duration, 1)}`,
+    title: cut ? 'Hard cut · click to choose a transition, double-click for a crossfade' : `${transitionLabel(t.type)} · ${fmtSec(t.duration, 1)}`,
     onclick: () => select({ kind: 'transition', index: i }),
-    ondblclick: () => onTransitionDblClick(i),
+    ondblclick: () => { if (cut) setTransition(i, { type: 'fade', duration: DEFAULT_TRANSITION }); },
   }, cut ? h('i') : h('span', { class: 'trlabel', text: `${transitionLabel(t.type)} ${t.duration.toFixed(1)}s` }));
+}
+
+// The music lane: how much of the video the track covers, and its mix at a glance.
+function renderMusicLane() {
+  const lane = el.musicLane, m = state.music, src = m && source(m.sourceId);
+  lane.className = `musiclane${m ? '' : ' none'}${state.selection?.kind === 'music' ? ' selected' : ''}`;
+  if (!m) {
+    lane.title = 'Lay a music track under the whole sequence';
+    lane.style.removeProperty('--covered');
+    lane.replaceChildren(h('span', { class: 'musicname', text: '♪  Add music…' }));
+    return;
+  }
+  const total = totalDuration();
+  const left = src ? src.duration - m.start : 0;
+  const short = left < total;
+  lane.title = 'Music · click for volume, fades and mix';
+  lane.style.setProperty('--covered', `${(m.loop || !short ? 1 : clamp(left / (total || 1), 0.04, 1)) * 100}%`);
+  const meta = [`${Math.round(m.volume * 100)}%`, m.mode === 'replace' ? 'music only' : 'under the clips'];
+  if (short) meta.push(m.loop ? 'looped' : `ends at ${fmtShort(left)}`);
+  lane.replaceChildren(h('span', { class: 'musicname', text: `♪  ${src?.name || 'missing'}` }), h('span', { class: 'musicmeta num', text: meta.join(' · ') }));
 }
 
 export function renderSequence() {
@@ -95,6 +114,7 @@ export function renderSequence() {
   el.seqInfo.textContent = n ? bits.join(' · ') : '';
   el.undoBtn.disabled = !canUndo();
   el.redoBtn.disabled = !canRedo();
+  renderMusicLane();
   renderSeqPlayhead();
 }
 
@@ -183,7 +203,11 @@ export function initSequence() {
   el.seqClips.addEventListener('pointermove', onMove);
   el.seqClips.addEventListener('pointerup', onUp);
   el.seqClips.addEventListener('pointercancel', onUp);
-  el.seqAddBtn.addEventListener('click', (e) => onAdd(e));
+  el.seqAddBtn.addEventListener('click', () => handlers.add(el.seqAddBtn));
+  el.musicLane.addEventListener('click', () => {
+    select({ kind: 'music' });
+    if (!state.music) handlers.addMusic();
+  });
   el.undoBtn.addEventListener('click', undo);
   el.redoBtn.addEventListener('click', redo);
   new ResizeObserver(() => { redrawThumbs(); renderSeqPlayhead(); }).observe(el.seqClips);

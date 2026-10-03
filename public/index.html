@@ -20,10 +20,11 @@
         Add
       </button>
       <div class="menupanel" role="menu" hidden>
-        <button type="button" role="menuitem" id="addFileBtn">Media file…<kbd>video · image · music</kbd></button>
+        <button type="button" role="menuitem" id="addFileBtn">Media files…<kbd>video · image · music</kbd></button>
         <button type="button" role="menuitem" id="addCardBtn">Title card…</button>
+        <button type="button" role="menuitem" id="addMusicBtn">Music track…</button>
         <div class="menusep" id="addFromSep" hidden></div>
-        <div class="menulabel" id="addFromLabel" hidden>From loaded media</div>
+        <div class="menulabel" id="addFromLabel" hidden>Use again</div>
         <div id="addFromList"></div>
       </div>
     </div>
@@ -74,13 +75,10 @@
         <span class="time num"><span id="curTime">00:00.000</span><span class="muted"> / </span><span id="totTime" class="muted">00:00.000</span></span>
         <span class="muted" id="transportLabel"></span>
         <span class="spacer"></span>
-        <div class="inout num" id="inout">
-          <label class="muted">In <input type="text" id="inInput" class="num" spellcheck="false" autocomplete="off"></label>
-          <button type="button" class="small" id="setIn" title="Set in point at the playhead (I)">Set in</button>
-          <label class="muted">Out <input type="text" id="outInput" class="num" spellcheck="false" autocomplete="off"></label>
-          <button type="button" class="small" id="setOut" title="Set out point at the playhead (O)">Set out</button>
-          <button type="button" class="small" id="splitBtn" title="Split the clip at the playhead (S)">Split</button>
-          <span class="muted">clip <span id="selLen" class="text">0.00 s</span></span>
+        <div class="marks">
+          <button type="button" class="small" id="setIn" title="Start the clip at the playhead">Set in<kbd>I</kbd></button>
+          <button type="button" class="small" id="setOut" title="End the clip at the playhead">Set out<kbd>O</kbd></button>
+          <button type="button" class="small" id="splitBtn" title="Cut the clip in two at the playhead">Split<kbd>S</kbd></button>
         </div>
       </div>
 
@@ -116,7 +114,8 @@
     </div>
     <div class="seqstrip" id="seqStrip">
       <div class="seqclips" id="seqClips"></div>
-      <button type="button" class="seqadd" id="seqAddBtn" title="Add a clip">+</button>
+      <button type="button" class="seqadd" id="seqAddBtn" title="Add clips, a title card or music" data-menu>+</button>
+      <button type="button" class="musiclane" id="musicLane"></button>
       <div class="seqplayhead" id="seqPlayhead" hidden></div>
     </div>
   </section>
@@ -146,7 +145,10 @@
         <select id="optEncoder"><option value="auto">Auto</option></select></label>
     </div>
     <div class="row estimate-row">
-      <div class="estimate" id="estimate"></div>
+      <div class="estimatebox">
+        <div class="estimate" id="estimate"></div>
+        <div class="savesto muted" id="savesTo" hidden></div>
+      </div>
       <div class="exportarea" id="exportArea">
         <button type="button" id="previewBtn" title="Render a quick low-resolution draft of the whole sequence and play it here (P)">Preview</button>
         <div class="progress" id="previewProgress" hidden>
@@ -163,7 +165,6 @@
     </div>
     <div class="row result-row" id="resultRow" hidden>
       <span class="resulttext" id="resultText"></span>
-      <span class="spacer"></span>
       <button type="button" class="small" id="revealBtn" hidden>Show in folder</button>
       <a class="btn small" id="downloadBtn" download hidden>Download</a>
       <button type="button" class="small" id="dismissResultBtn" title="Dismiss">✕</button>
@@ -220,8 +221,8 @@
           <li><b>Add</b> your recordings, screenshots and a music track (drop them anywhere).</li>
           <li>Pick a clip, drag the <b>in / out</b> handles or press <kbd>I</kbd> / <kbd>O</kbd>; <kbd>S</kbd> splits a long recording at the playhead.</li>
           <li>Drag clips to reorder. Click the marker between two clips to pick a <b>transition</b>.</li>
-          <li>In the panel on the right set <b>fades</b>, <b>music</b> volume and loudness. <kbd>P</kbd> renders a quick draft preview.</li>
-          <li>Choose <b>Steam</b> (or a Discord size) and press <b>Export</b>.</li>
+          <li>Click the <b>music</b> bar under the clips for its volume and fades; <b>Whole video</b> on the right has the fade in / out and loudness.</li>
+          <li><kbd>P</kbd> renders a quick draft and plays it. Then choose <b>Steam</b> (or a Discord size) and press <b>Export</b>.</li>
         </ol>
         <p class="muted">A single clip with nothing applied and the <i>No limit</i> preset is copied without re-encoding (instant, keyframe accurate). Everything else is re-encoded frame accurately.</p>
       </div>
@@ -234,11 +235,11 @@
           <tr><td><kbd>Home</kbd> / <kbd>End</kbd></td><td>Jump to in / out point</td></tr>
           <tr><td><kbd>S</kbd></td><td>Split clip at playhead</td></tr>
           <tr><td><kbd>D</kbd></td><td>Duplicate clip</td></tr>
-          <tr><td><kbd>Delete</kbd></td><td>Remove clip</td></tr>
+          <tr><td><kbd>Delete</kbd></td><td>Remove the selected clip, transition or music</td></tr>
           <tr><td><kbd>,</kbd> / <kbd>.</kbd></td><td>Previous / next clip</td></tr>
           <tr><td><kbd>Alt</kbd>+<kbd>←</kbd> / <kbd>→</kbd></td><td>Move clip earlier / later</td></tr>
           <tr><td><kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd></td><td>Undo / redo</td></tr>
-          <tr><td><kbd>P</kbd></td><td>Render preview</td></tr>
+          <tr><td><kbd>P</kbd></td><td>Render and play the draft preview</td></tr>
           <tr><td><kbd>Enter</kbd></td><td>Export</td></tr>
           <tr><td><kbd>Esc</kbd></td><td>Cancel export / close</td></tr>
           <tr><td><kbd>Ctrl</kbd>+<kbd>S</kbd></td><td>Save project</td></tr>
