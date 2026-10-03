@@ -4,27 +4,31 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { locate, detectEncoders, probe, keyframes } from '../src/ffmpeg.js';
+import { locate, detectCapabilities, probe, keyframes } from '../src/ffmpeg.js';
 import { createServer, DEFAULT_OUTPUT_DIR, VERSION } from '../src/server.js';
 import { Jobs, isTerminal } from '../src/jobs.js';
 import { planExport } from '../src/plan.js';
 
-const HELP = `OpenVideoChamp ${VERSION} - fast video cutting and size-targeted compression
+const HELP = `OpenVideoChamp ${VERSION} - video cutting, trailers and size-targeted compression
 
 Usage:
   ovc [file] [--port 4455] [--no-open]      start the local server and open the UI
   ovc cut <file> [options]                  export one clip without the UI
+  ovc render <project.ovc.json> [options]   render a project saved by the UI (clips, transitions, music, ...)
 
 Cut options:
   --from <t> --to <t>      range; seconds or mm:ss(.ms) / hh:mm:ss(.ms)   (default: whole file)
+  --precise                frame-accurate cut (re-encode) instead of keyframe-snapped stream copy
+
+Cut and render options:
   --size <MB>              target size, e.g. 10MB or 2.5     (custom preset)
-  --preset <name>          discord | discord50 | discord500 | steam | cut  (default: cut)
+  --preset <name>          discord | discord50 | discord500 | steam | cut  (cut: default, render: from the project)
   --out <path>             output file (default: next to the source, never overwrites)
   --res <height>           1080 | 720 | 480 | 360 | source | auto
   --fps <n>                60 | 30 | source | auto
   --mute                   drop audio
-  --precise                frame-accurate cut (re-encode) instead of keyframe-snapped stream copy
   --speed <s>              fast | balanced | best  (x264 preset veryfast | medium | slow)
+  --encoder <name>         libx264 (default) or a verified hardware encoder (h264_nvenc, h264_qsv, ...)
 
 Environment: OVC_PORT, OVC_FFMPEG, OVC_FFPROBE.
 `;
@@ -81,8 +85,8 @@ function shutdownOn(jobs, server) {
 
 function serve(positional, opts) {
   const { ffmpeg, ffprobe } = locate();
-  const encoderState = detectEncoders(ffmpeg);
-  const { server, jobs } = createServer({ ffmpeg, ffprobe, encoderState, tmpDir });
+  const capabilities = detectCapabilities(ffmpeg);
+  const { server, jobs } = createServer({ ffmpeg, ffprobe, capabilities, tmpDir });
   shutdownOn(jobs, server);
   const port = Number(opts.port ?? process.env.OVC_PORT ?? 4455);
   server.on('error', (e) => die(`Cannot listen on 127.0.0.1:${port}: ${e.message}`));
@@ -93,38 +97,11 @@ function serve(positional, opts) {
   });
 }
 
-async function cut(positional, opts) {
-  const file = positional[0];
-  if (!file) die('Usage: ovc cut <file> --from <t> --to <t> [options]');
-  const { ffmpeg, ffprobe } = locate();
-  const abs = path.resolve(file);
-  if (!fs.existsSync(abs)) die(`File not found: ${abs}`);
-  const source = { id: 's_cli', name: path.basename(abs), path: abs, uploaded: false, ...(await probe(ffprobe, abs)) };
-  const request = {
-    sourceId: source.id,
-    start: opts.from != null ? parseTime(opts.from) : 0,
-    end: opts.to != null ? parseTime(opts.to) : source.duration,
-    preset: opts.size != null ? 'custom' : opts.preset ?? 'cut',
-    targetMB: opts.size != null ? parseFloat(opts.size) : null,
-    cut: opts.precise ? 'precise' : 'fast',
-    resolution: opts.res ?? 'auto',
-    fps: opts.fps ?? 'auto',
-    audio: opts.mute ? 'mute' : 'keep',
-    speed: opts.speed ?? 'balanced',
-    encoder: 'auto',
-    outputPath: opts.out ?? null,
-  };
-  const copy = request.preset === 'cut' && request.cut === 'fast';
-  const plan = planExport(source, request, {
-    encoders: ['libx264'], defaultOutputDir: DEFAULT_OUTPUT_DIR, exists: fs.existsSync,
-    keyframes: copy ? await keyframes(ffprobe, abs) : [],
-  });
-  for (const w of plan.warnings) console.error(`warning: ${w}`);
-  console.error(plan.summary);
-
+// Runs one plan to completion with progress on stderr; resolves to the terminal Job.
+function runJob(ffmpeg, plan, sources, request) {
   const jobs = new Jobs({ ffmpeg, tmpDir });
   shutdownOn(jobs);
-  const result = await new Promise((resolve) => {
+  return new Promise((resolve) => {
     jobs.on('change', (job) => {
       if (isTerminal(job.status)) return resolve(job);
       if (job.status !== 'running') return;
@@ -134,11 +111,93 @@ async function cut(positional, opts) {
       if (job.etaSeconds != null) parts.push(`eta ${job.etaSeconds}s`);
       process.stderr.write(`\r${parts.join('  ')}    `);
     });
-    jobs.create(plan, source, request);
+    jobs.create(plan, sources, request);
   });
+}
+
+async function finish(ffmpeg, plan, sources, request) {
+  for (const w of plan.warnings) console.error(`warning: ${w}`);
+  console.error(plan.summary);
+  const result = await runJob(ffmpeg, plan, sources, request);
   process.stderr.write('\n');
   if (result.status !== 'done') die(result.error || `Export ${result.status}`);
   console.log(result.outputPath);
+}
+
+// Encoders/transitions the local ffmpeg has; only waited for when something needs it.
+async function capabilities(ffmpeg, { encoders = false } = {}) {
+  const caps = detectCapabilities(ffmpeg);
+  if (encoders) await caps.ready;
+  else await caps.transitionsReady;
+  return caps;
+}
+
+function outputOptions(opts, defaults = {}) {
+  return {
+    preset: opts.size != null ? 'custom' : opts.preset ?? defaults.preset ?? 'cut',
+    targetMB: opts.size != null ? parseFloat(opts.size) : defaults.targetMB ?? null,
+    resolution: opts.res ?? defaults.resolution ?? 'auto',
+    fps: opts.fps ?? defaults.fps ?? 'auto',
+    audio: opts.mute ? 'mute' : defaults.audio ?? 'keep',
+    speed: opts.speed ?? defaults.speed ?? 'balanced',
+    encoder: opts.encoder ?? 'auto',
+    outputPath: opts.out ?? null,
+  };
+}
+
+async function cut(positional, opts) {
+  const file = positional[0];
+  if (!file) die('Usage: ovc cut <file> --from <t> --to <t> [options]');
+  const { ffmpeg, ffprobe } = locate();
+  const abs = path.resolve(file);
+  if (!fs.existsSync(abs)) die(`File not found: ${abs}`);
+  const source = { id: 's_cli', name: path.basename(abs), path: abs, uploaded: false, ...(await probe(ffprobe, abs)) };
+  if (source.kind !== 'video') die(`${source.name} is ${source.kind === 'audio' ? 'an audio file' : 'an image'}; ovc cut needs a video`);
+  const request = {
+    sourceId: source.id,
+    start: opts.from != null ? parseTime(opts.from) : 0,
+    end: opts.to != null ? parseTime(opts.to) : source.duration,
+    cut: opts.precise ? 'precise' : 'fast',
+    ...outputOptions(opts),
+  };
+  const copy = request.preset === 'cut' && request.cut === 'fast';
+  const encoders = opts.encoder && opts.encoder !== 'auto' ? (await capabilities(ffmpeg, { encoders: true })).encoders : ['libx264'];
+  const plan = planExport(source, request, {
+    encoders, defaultOutputDir: DEFAULT_OUTPUT_DIR, exists: fs.existsSync,
+    keyframes: copy ? await keyframes(ffprobe, abs) : [],
+  });
+  await finish(ffmpeg, plan, source, request);
+}
+
+async function render(positional, opts) {
+  const file = positional[0];
+  if (!file) die('Usage: ovc render <project.ovc.json> [--preset <name>] [--size <MB>] [--out <path>]');
+  const abs = path.resolve(file);
+  if (!fs.existsSync(abs)) die(`File not found: ${abs}`);
+  let data;
+  try { data = JSON.parse(fs.readFileSync(abs, 'utf8')); } catch (e) { die(`Cannot read project: ${e.message}`); }
+  if (data.app !== 'OpenVideoChamp' || !Array.isArray(data.clips) || !data.clips.length) die('Not an OpenVideoChamp project file (or it has no clips)');
+  const { ffmpeg, ffprobe } = locate();
+  const caps = await capabilities(ffmpeg, { encoders: Boolean(opts.encoder && opts.encoder !== 'auto') });
+  const sources = new Map();
+  for (const s of data.sources || []) {
+    if (!s?.id || !s?.path) continue;
+    const p = path.resolve(path.dirname(abs), s.path);
+    if (!fs.existsSync(p)) die(`Source not found: ${p}`);
+    sources.set(s.id, { id: s.id, name: s.name || path.basename(p), path: p, uploaded: false, ...(await probe(ffprobe, p)) });
+  }
+  const request = {
+    clips: data.clips, transitions: data.transitions, fadeIn: data.fadeIn, fadeOut: data.fadeOut, music: data.music, normalize: data.normalize,
+    cut: data.output?.cut ?? 'fast',
+    ...outputOptions(opts, { preset: 'steam', ...(data.output || {}) }),
+  };
+  const getSource = (id) => sources.get(id) || null;
+  const plan = planExport(getSource, request, {
+    encoders: caps.encoders.length ? caps.encoders : ['libx264'], transitions: caps.transitions,
+    defaultOutputDir: DEFAULT_OUTPUT_DIR, exists: fs.existsSync,
+  });
+  console.error(`${data.name || path.basename(abs)}: ${plan.clips} clip${plan.clips === 1 ? '' : 's'}, ${plan.transitions} transition${plan.transitions === 1 ? '' : 's'}${plan.music ? ', music' : ''}, ${plan.duration.toFixed(1)} s`);
+  await finish(ffmpeg, plan, getSource, request);
 }
 
 const { opts, positional } = parseArgv(process.argv.slice(2));
@@ -146,6 +205,7 @@ try {
   if (opts.help || opts.h) console.log(HELP);
   else if (opts.version) console.log(VERSION);
   else if (positional[0] === 'cut') await cut(positional.slice(1), opts);
+  else if (positional[0] === 'render') await render(positional.slice(1), opts);
   else serve(positional, opts);
 } catch (err) {
   die(err.message);

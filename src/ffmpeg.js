@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { createRequire } from 'node:module';
+import { ALL_TRANSITIONS } from './plan.js';
 
 const require = createRequire(import.meta.url);
 const ENCODER_CANDIDATES = ['libx264', 'h264_nvenc', 'h264_amf', 'h264_qsv', 'h264_videotoolbox'];
@@ -67,20 +68,41 @@ function rotation(stream) {
   return Number(sd?.rotation ?? stream.tags?.rotate ?? 0);
 }
 
+const IMAGE_CODECS = new Set(['png', 'mjpeg', 'webp', 'bmp', 'tiff', 'gif', 'ppm', 'pgm', 'pam', 'psd', 'exr', 'tga', 'jpegls', 'jpeg2000', 'qoi']);
+
 // Returns the Source fields that come from ffprobe (id/name/path/uploaded are the caller's).
+// kind: "video" (usable as a clip, may carry audio), "image" (a still, shown for a chosen duration)
+// or "audio" (music only).
 export async function probe(ffprobe, file) {
   const { stdout } = await run(ffprobe, ['-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', file]);
   const info = JSON.parse(stdout);
   const streams = info.streams || [];
-  const v = streams.find((s) => s.codec_type === 'video' && !s.disposition?.attached_pic);
-  if (!v) throw Object.assign(new Error('No video stream found in file'), { status: 400 });
   const a = streams.find((s) => s.codec_type === 'audio');
+  const v = streams.find((s) => s.codec_type === 'video' && !s.disposition?.attached_pic);
+  if (!v && !a) throw Object.assign(new Error('No video or audio stream found in file'), { status: 400 });
+  const format = info.format.format_name || '';
+  const size = Number(info.format.size) || 0;
+  const bitrate = Math.round(Number(info.format.bit_rate) / 1000) || 0;
+  if (!v) {
+    return {
+      kind: 'audio', size, duration: Number(info.format.duration ?? a.duration) || 0, width: 0, height: 0, fps: 0,
+      videoCodec: null, audioCodec: a.codec_name, hasAudio: true, bitrate, container: format,
+    };
+  }
+  const image = IMAGE_CODECS.has(v.codec_name) && (/image2|_pipe/.test(format) || !(Number(info.format.duration) > 0.1) || Number(v.nb_frames) === 1);
   const swap = Math.abs(rotation(v)) % 180 === 90;
   let fps = rate(v.r_frame_rate);
   // r_frame_rate can be a huge "timebase" rate for variable-frame-rate files; the average is saner then.
   if (!(fps > 0) || fps > 240) fps = rate(v.avg_frame_rate) || 30;
+  if (image) {
+    return {
+      kind: 'image', size, duration: 0, width: v.width, height: v.height, fps: 0,
+      videoCodec: v.codec_name, audioCodec: null, hasAudio: false, bitrate: 0, container: format,
+    };
+  }
   return {
-    size: Number(info.format.size) || 0,
+    kind: 'video',
+    size,
     duration: Number(info.format.duration ?? v.duration) || 0,
     width: swap ? v.height : v.width,
     height: swap ? v.width : v.height,
@@ -88,8 +110,8 @@ export async function probe(ffprobe, file) {
     videoCodec: v.codec_name,
     audioCodec: a?.codec_name ?? null,
     hasAudio: Boolean(a),
-    bitrate: Math.round(Number(info.format.bit_rate) / 1000) || 0,
-    container: info.format.format_name,
+    bitrate,
+    container: format,
   };
 }
 
@@ -128,16 +150,36 @@ async function verifyEncoder(ffmpeg, name) {
   }
 }
 
-// Starts detection in the background; read `state.encoders` at any time, await `state.ready` for the final list.
-export function detectEncoders(ffmpeg) {
-  const state = { encoders: [], ready: null };
+// Which xfade transitions this ffmpeg knows (the list grew from 4.3 to 6.1).
+async function listTransitions(ffmpeg) {
+  const { stdout } = await run(ffmpeg, ['-hide_banner', '-h', 'filter=xfade']).catch(() => ({ stdout: '' }));
+  const names = [];
+  let inList = false;
+  for (const line of stdout.split('\n')) {
+    if (/^\s*transition\s/.test(line)) { inList = true; continue; }
+    if (!inList) continue;
+    const m = /^\s+([a-z]+)\s+(-?\d+)\s/.exec(line);
+    if (!m) break;
+    if (m[1] !== 'custom') names.push(m[1]);
+  }
+  return names;
+}
+
+// Starts detection in the background; read `state.encoders` / `state.transitions` at any time,
+// await `state.ready` for the final lists.
+export function detectCapabilities(ffmpeg) {
+  const state = { encoders: [], transitions: ALL_TRANSITIONS, ready: null, transitionsReady: null };
+  state.transitionsReady = listTransitions(ffmpeg).then((t) => { if (t.length) state.transitions = t; return state.transitions; });
   state.ready = (async () => {
-    const { stdout } = await run(ffmpeg, ['-hide_banner', '-encoders']).catch(() => ({ stdout: '' }));
+    const [{ stdout }] = await Promise.all([
+      run(ffmpeg, ['-hide_banner', '-encoders']).catch(() => ({ stdout: '' })),
+      state.transitionsReady,
+    ]);
     const listed = ENCODER_CANDIDATES.filter((name) => new RegExp(`^\\s*V\\S*\\s+${name}\\s`, 'm').test(stdout));
     if (listed.includes('libx264')) state.encoders = ['libx264']; // assumed until verified
     const ok = await Promise.all(listed.map((name) => verifyEncoder(ffmpeg, name)));
     state.encoders = listed.filter((_, i) => ok[i]);
-    return state.encoders;
+    return state;
   })();
   return state;
 }

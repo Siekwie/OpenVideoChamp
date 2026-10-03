@@ -11,6 +11,8 @@ import { locate } from '../src/ffmpeg.js';
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const WORK = path.join(ROOT, 'test', '.work');
 const SAMPLE = path.join(WORK, 'sample.mp4');
+const CARD = path.join(WORK, 'card.png');
+const MUSIC = path.join(WORK, 'music.wav');
 const { ffmpeg, ffprobe } = locate();
 
 let proc, base, sourceId;
@@ -46,6 +48,12 @@ before(async () => {
     execFileSync(ffmpeg, ['-y', '-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=1280x720:rate=30',
       '-f', 'lavfi', '-i', 'sine=frequency=440', '-t', '12', '-c:v', 'libx264', '-preset', 'ultrafast', '-c:a', 'aac', SAMPLE]);
   }
+  if (!fs.existsSync(CARD)) {
+    execFileSync(ffmpeg, ['-y', '-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'color=c=0x203040:size=1920x1080:rate=1', '-frames:v', '1', CARD]);
+  }
+  if (!fs.existsSync(MUSIC)) {
+    execFileSync(ffmpeg, ['-y', '-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'sine=frequency=220:sample_rate=44100', '-t', '4', MUSIC]);
+  }
   proc = spawn(process.execPath, [path.join(ROOT, 'bin', 'ovc.js'), '--no-open', '--port', '0'], { cwd: ROOT, stdio: ['ignore', 'pipe', 'inherit'] });
   base = await new Promise((resolve, reject) => {
     let out = '';
@@ -63,10 +71,11 @@ after(() => proc?.kill());
 test('GET /api/info', async () => {
   const { status, data } = await api('GET', '/api/info');
   assert.equal(status, 200);
-  assert.equal(data.version, '0.1.0');
+  assert.equal(data.version, JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version);
   assert.equal(data.platform, process.platform);
   assert.ok(data.ffmpeg.path);
   assert.ok(Array.isArray(data.encoders));
+  assert.ok(Array.isArray(data.transitions) && data.transitions.includes('fade') && data.transitions.includes('wipeleft'));
   assert.equal(typeof data.dialog, 'boolean');
   assert.ok(data.defaultOutputDir);
 });
@@ -83,6 +92,7 @@ test('POST /api/open probes the file', async () => {
   assert.equal(data.width, 1280);
   assert.equal(data.height, 720);
   assert.equal(data.fps, 30);
+  assert.equal(data.kind, 'video');
   assert.equal(data.videoCodec, 'h264');
   assert.equal(data.audioCodec, 'aac');
   assert.equal(data.hasAudio, true);
@@ -235,4 +245,106 @@ test('GET /api/docs serves markdown; unknown routes are JSON 404s', async () => 
   const { status, data } = await api('GET', '/api/nothing');
   assert.equal(status, 404);
   assert.ok(data.error);
+});
+
+// ------------------------------------------------------------------ sequences
+
+let cardId, musicId;
+
+test('images and audio files register with their kind; GET /api/sources lists everything', async () => {
+  const card = await api('POST', '/api/open', { path: CARD });
+  assert.equal(card.status, 200, JSON.stringify(card.data));
+  assert.equal(card.data.kind, 'image');
+  assert.equal(card.data.width, 1920);
+  assert.equal(card.data.height, 1080);
+  assert.equal(card.data.duration, 0);
+  assert.equal(card.data.hasAudio, false);
+  cardId = card.data.id;
+  const music = await api('POST', '/api/open', { path: MUSIC });
+  assert.equal(music.status, 200, JSON.stringify(music.data));
+  assert.equal(music.data.kind, 'audio');
+  assert.equal(music.data.hasAudio, true);
+  assert.ok(Math.abs(music.data.duration - 4) < 0.1);
+  musicId = music.data.id;
+  const list = await api('GET', '/api/sources');
+  assert.equal(list.status, 200);
+  assert.ok(list.data.some((s) => s.id === sourceId) && list.data.some((s) => s.id === cardId) && list.data.some((s) => s.id === musicId));
+  // keyframes of an image are an empty list, and its stream is served as an image
+  assert.deepEqual((await api('GET', `/api/sources/${cardId}/keyframes`)).data, { times: [] });
+  const res = await fetch(`${base}/api/sources/${cardId}/stream`);
+  assert.equal(res.headers.get('content-type'), 'image/png');
+  await res.arrayBuffer();
+  // audio cannot be a clip, an image cannot be music
+  assert.equal((await api('POST', '/api/plan', { clips: [{ sourceId: musicId, end: 2 }], preset: 'cut', cut: 'precise' })).status, 400);
+  assert.equal((await api('POST', '/api/plan', { sourceId, start: 0, end: 2, music: { sourceId: cardId } })).status, 400);
+});
+
+const sequence = (over = {}) => ({
+  clips: [
+    { sourceId, start: 2, end: 5 },
+    { sourceId, start: 7, end: 10, volume: 0.5 },
+    { sourceId: cardId, end: 2 },
+  ],
+  transitions: [{ type: 'fade', duration: 1 }, { type: 'cut' }],
+  fadeIn: 0.5, fadeOut: 1,
+  music: { sourceId: musicId, volume: 0.6, fadeIn: 0.5, fadeOut: 1, loop: true },
+  normalize: true,
+  preset: 'custom', targetMB: 2, speed: 'fast',
+  ...over,
+});
+
+test('export: three clips with a crossfade, a title card, looping music, fades and normalisation', async () => {
+  const planned = await api('POST', '/api/plan', sequence());
+  assert.equal(planned.status, 200, JSON.stringify(planned.data));
+  assert.equal(planned.data.duration, 7); // 3 + 3 - 1 + 2
+  assert.equal(planned.data.clips, 3);
+  assert.equal(planned.data.transitions, 1);
+  assert.equal(planned.data.music, true);
+  assert.equal(planned.data.width, 1280);
+  assert.equal(planned.data.height, 720);
+  assert.equal(planned.data.outputPath, path.join(WORK, 'sample_edit_2MB.mp4'));
+
+  const { status, data } = await api('POST', '/api/export', sequence());
+  assert.equal(status, 200, JSON.stringify(data));
+  const job = await waitForJob(data.jobId, (j) => ['done', 'error', 'cancelled'].includes(j.status), 90_000);
+  assert.equal(job.status, 'done', job.log);
+  assert.equal(job.passes, 2);
+  assert.ok(fs.existsSync(job.outputPath));
+  assert.ok(job.outputBytes <= 2_000_000, `output ${job.outputBytes} bytes`);
+  assert.ok(Math.abs(duration(job.outputPath) - 7) <= 0.15, `duration ${duration(job.outputPath)}`);
+  const streams = probeField(job.outputPath, 'stream=codec_type,codec_name,width,height,sample_rate').split('\n');
+  assert.ok(streams.some((l) => l.includes('video') && l.includes('h264') && l.includes('1280') && l.includes('720')), streams.join(' | '));
+  assert.ok(streams.some((l) => l.includes('audio') && l.includes('aac') && l.includes('48000')), streams.join(' | '));
+});
+
+test('export: a transition longer than its clip is rejected before anything runs', async () => {
+  const { status, data } = await api('POST', '/api/export', sequence({ transitions: [{ type: 'fade', duration: 4 }, { type: 'cut' }] }));
+  assert.equal(status, 400);
+  assert.match(data.error, /too short/);
+});
+
+test('preview: draft render lands in the temp dir and streams back with Range support; music-only mix', async () => {
+  const { status, data } = await api('POST', '/api/export', sequence({ preview: true, normalize: false, music: { sourceId: musicId, mode: 'replace', loop: false, volume: 1 } }));
+  assert.equal(status, 200, JSON.stringify(data));
+  const job = await waitForJob(data.jobId, (j) => ['done', 'error', 'cancelled'].includes(j.status), 90_000);
+  assert.equal(job.status, 'done', job.log);
+  assert.equal(job.preview, true);
+  assert.equal(job.passes, 1);
+  assert.equal(job.plan.height, 480);
+  assert.equal(job.plan.targetBytes, null);
+  assert.ok(!job.outputPath.startsWith(WORK), `preview must not be written next to the source: ${job.outputPath}`);
+  assert.ok(Math.abs(duration(job.outputPath) - 7) <= 0.15, `duration ${duration(job.outputPath)}`);
+  assert.ok(probeField(job.outputPath, 'stream=codec_type').includes('audio'), 'music-only output still has an audio track');
+  const res = await fetch(`${base}/api/jobs/${data.jobId}/stream`, { headers: { range: 'bytes=0-99' } });
+  assert.equal(res.status, 206);
+  assert.equal(res.headers.get('content-type'), 'video/mp4');
+  assert.equal((await res.arrayBuffer()).byteLength, 100);
+  const whole = await fetch(`${base}/api/jobs/${data.jobId}/stream`);
+  assert.equal(whole.status, 200);
+  assert.equal(Number(whole.headers.get('content-length')), job.outputBytes);
+  await whole.arrayBuffer();
+  // a plain single-clip request still works exactly as before (legacy shape)
+  const legacy = await api('POST', '/api/plan', { sourceId, start: 1, end: 3, preset: 'cut', cut: 'fast' });
+  assert.equal(legacy.status, 200);
+  assert.equal(legacy.data.mode, 'copy');
 });

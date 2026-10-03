@@ -1,7 +1,7 @@
 {
   "name": "openvideochamp",
-  "version": "0.1.0",
-  "description": "Fast, simple video cutting and size-targeted compression (Discord, Steam) with a local API.",
+  "version": "0.2.0",
+  "description": "Local video cutting, trailer assembly (transitions, music, title cards) and size-targeted compression (Discord, Steam) with a browser UI and a JSON API.",
   "license": "MIT",
   "type": "module",
   "bin": {
