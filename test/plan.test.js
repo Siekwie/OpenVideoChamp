@@ -368,11 +368,15 @@ test('music: mixed under the clips with its own fades, looped, seeked, or replac
   assert.match(g, /\[y1\]\[m\]amix=inputs=2:duration=first:dropout_transition=0:normalize=0\[mix\]/);
   assert.deepEqual(allValues(args, '-map'), ['[x1]', '[mix]']);
 
-  const rep = seqReq({ music: { sourceId: 's_mus', mode: 'replace', loop: false } });
+  const rep = seqReq({ music: { sourceId: 's_mus', mode: 'replace', loop: false }, fadeOut: 1 });
   const a2 = buildArgs(planExport(lib, rep, opts), lib, rep)[0];
   assert.ok(!a2.includes('-stream_loop'));
-  assert.ok(!graphOf(a2).includes('amix'));
-  assert.deepEqual(allValues(a2, '-map'), ['[x1]', '[m]']);
+  const g2 = graphOf(a2);
+  assert.ok(!g2.includes('amix'));
+  // the clip audio is not built at all (an unconsumed [y1] would make ffmpeg refuse the graph)
+  assert.ok(!/\[[01]:a\]/.test(g2) && !g2.includes('anullsrc') && !g2.includes('acrossfade'), g2);
+  assert.match(g2, /\[m\]afade=t=out:st=7:d=1\[aout\]/);
+  assert.deepEqual(allValues(a2, '-map'), ['[vout]', '[aout]']);
 
   // music on an otherwise silent sequence still produces an audio track; music + global mute has none
   const silentClips = { clips: [{ sourceId: 's_b', end: 2 }], transitions: [] };

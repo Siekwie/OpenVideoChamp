@@ -168,13 +168,13 @@ async function listTransitions(ffmpeg) {
 // Starts detection in the background; read `state.encoders` / `state.transitions` at any time,
 // await `state.ready` for the final lists.
 export function detectCapabilities(ffmpeg) {
-  const state = { encoders: [], transitions: ALL_TRANSITIONS, ready: null };
+  const state = { encoders: [], transitions: ALL_TRANSITIONS, ready: null, transitionsReady: null };
+  state.transitionsReady = listTransitions(ffmpeg).then((t) => { if (t.length) state.transitions = t; return state.transitions; });
   state.ready = (async () => {
-    const [{ stdout }, transitions] = await Promise.all([
+    const [{ stdout }] = await Promise.all([
       run(ffmpeg, ['-hide_banner', '-encoders']).catch(() => ({ stdout: '' })),
-      listTransitions(ffmpeg),
+      state.transitionsReady,
     ]);
-    if (transitions.length) state.transitions = transitions;
     const listed = ENCODER_CANDIDATES.filter((name) => new RegExp(`^\\s*V\\S*\\s+${name}\\s`, 'm').test(stdout));
     if (listed.includes('libx264')) state.encoders = ['libx264']; // assumed until verified
     const ok = await Promise.all(listed.map((name) => verifyEncoder(ffmpeg, name)));
