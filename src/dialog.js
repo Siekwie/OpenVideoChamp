@@ -33,7 +33,14 @@ export function dialogAvailable() {
   return Boolean(onPath('zenity') || onPath('kdialog'));
 }
 
-export async function openFileDialog() {
+// One path per output line -> { paths } (or { cancelled } when nothing was picked).
+function picked(r) {
+  const paths = r.code === 0 ? r.stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean) : [];
+  return paths.length ? { paths } : { cancelled: true };
+}
+
+// Resolves to { paths: [...] }, { cancelled: true } or { unsupported: true }.
+export async function openFileDialog({ multiple = false } = {}) {
   const globs = MEDIA_EXTS.map((e) => `*.${e}`).join(' ');
   const win = (exts) => exts.map((e) => `*.${e}`).join(';');
   if (process.platform === 'win32') {
@@ -43,23 +50,26 @@ export async function openFileDialog() {
       '$d = New-Object System.Windows.Forms.OpenFileDialog',
       `$d.Filter = 'Media files|${win(MEDIA_EXTS)}|Video|${win(VIDEO_EXTS)}|Images|${win(IMAGE_EXTS)}|Audio|${win(AUDIO_EXTS)}|All files|*.*'`,
       "$d.Title = 'Open media'",
+      `$d.Multiselect = $${multiple}`,
       '$top = New-Object System.Windows.Forms.Form -Property @{ TopMost = $true; ShowInTaskbar = $false }',
-      'if ($d.ShowDialog($top) -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $d.FileName } else { exit 2 }',
+      'if ($d.ShowDialog($top) -eq [System.Windows.Forms.DialogResult]::OK) { $d.FileNames | ForEach-Object { Write-Output $_ } } else { exit 2 }',
     ].join('; ');
     const r = await exec('powershell', ['-NoProfile', '-NonInteractive', '-STA', '-Command', script]);
-    if (r.code === 0 && r.stdout.trim()) return { path: r.stdout.trim() };
+    if (r.code === 0 && r.stdout.trim()) return picked(r);
     // exit 2 is our own "cancelled"; anything else (missing, Constrained Language Mode, ...) means no dialog.
     return r.code === 2 ? { cancelled: true } : { unsupported: true };
   }
   if (process.platform === 'darwin') {
-    const r = await exec('osascript', ['-e', 'POSIX path of (choose file of type {"public.movie", "public.image", "public.audio"} with prompt "Open media")']);
-    if (r.missing) return { unsupported: true };
-    return r.code === 0 && r.stdout.trim() ? { path: r.stdout.trim() } : { cancelled: true };
+    const choose = `choose file of type {"public.movie", "public.image", "public.audio"} with prompt "Open media"${multiple ? ' with multiple selections allowed' : ''}`;
+    const r = await exec('osascript', ['-e', `set picked to ${choose}`, '-e', 'set out to ""',
+      '-e', 'repeat with f in (picked as list)', '-e', 'set out to out & POSIX path of f & linefeed', '-e', 'end repeat', '-e', 'out']);
+    return r.missing ? { unsupported: true } : picked(r);
   }
-  const zenity = await exec('zenity', ['--file-selection', '--title=Open media', `--file-filter=Media files | ${globs}`, '--file-filter=All files | *']);
-  if (!zenity.missing) return zenity.code === 0 && zenity.stdout.trim() ? { path: zenity.stdout.trim() } : { cancelled: true };
-  const kdialog = await exec('kdialog', ['--title', 'Open media', '--getopenfilename', '.', `Media files (${globs})`]);
-  if (!kdialog.missing) return kdialog.code === 0 && kdialog.stdout.trim() ? { path: kdialog.stdout.trim() } : { cancelled: true };
+  const zenity = await exec('zenity', ['--file-selection', '--title=Open media', ...(multiple ? ['--multiple', '--separator=\n'] : []),
+    `--file-filter=Media files | ${globs}`, '--file-filter=All files | *']);
+  if (!zenity.missing) return picked(zenity);
+  const kdialog = await exec('kdialog', ['--title', 'Open media', ...(multiple ? ['--multiple', '--separate-output'] : []), '--getopenfilename', '.', `Media files (${globs})`]);
+  if (!kdialog.missing) return picked(kdialog);
   return { unsupported: true };
 }
 

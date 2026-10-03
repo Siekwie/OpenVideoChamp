@@ -8,11 +8,12 @@ import { locate, detectCapabilities, probe, keyframes } from '../src/ffmpeg.js';
 import { createServer, DEFAULT_OUTPUT_DIR, VERSION } from '../src/server.js';
 import { Jobs, isTerminal } from '../src/jobs.js';
 import { planExport } from '../src/plan.js';
+import { resolveProject, projectRequest } from '../src/project.js';
 
 const HELP = `OpenVideoChamp ${VERSION} - video cutting, trailers and size-targeted compression
 
 Usage:
-  ovc [file] [--port 4455] [--no-open]      start the local server and open the UI
+  ovc [file] [--port 4455] [--no-open]      start the local server and open the UI (file: a video or a project)
   ovc cut <file> [options]                  export one clip without the UI
   ovc render <project.ovc.json> [options]   render a project saved by the UI (clips, transitions, music, ...)
 
@@ -30,7 +31,7 @@ Cut and render options:
   --speed <s>              fast | balanced | best  (x264 preset veryfast | medium | slow)
   --encoder <name>         libx264 (default) or a verified hardware encoder (h264_nvenc, h264_qsv, ...)
 
-Environment: OVC_PORT, OVC_FFMPEG, OVC_FFPROBE.
+Environment: OVC_PORT, OVC_FFMPEG, OVC_FFPROBE, OVC_OUTPUT_DIR (default ~/Videos/OpenVideoChamp).
 `;
 const FLAGS = new Set(['no-open', 'mute', 'precise', 'help', 'h', 'version']);
 
@@ -93,7 +94,9 @@ function serve(positional, opts) {
   server.listen(port, '127.0.0.1', () => {
     const url = `http://127.0.0.1:${server.address().port}/`;
     console.log(`OpenVideoChamp ${VERSION} running at ${url}  (ffmpeg: ${ffmpeg})`);
-    if (!opts['no-open']) openBrowser(positional[0] ? `${url}?path=${encodeURIComponent(path.resolve(positional[0]))}` : url);
+    const file = positional[0] && path.resolve(positional[0]);
+    const query = file ? `?${/\.json$/i.test(file) ? 'project' : 'path'}=${encodeURIComponent(file)}` : '';
+    if (!opts['no-open']) openBrowser(url + query);
   });
 }
 
@@ -176,21 +179,20 @@ async function render(positional, opts) {
   if (!fs.existsSync(abs)) die(`File not found: ${abs}`);
   let data;
   try { data = JSON.parse(fs.readFileSync(abs, 'utf8')); } catch (e) { die(`Cannot read project: ${e.message}`); }
-  if (data.app !== 'OpenVideoChamp' || !Array.isArray(data.clips) || !data.clips.length) die('Not an OpenVideoChamp project file (or it has no clips)');
   const { ffmpeg, ffprobe } = locate();
   const caps = await capabilities(ffmpeg, { encoders: Boolean(opts.encoder && opts.encoder !== 'auto') });
   const sources = new Map();
-  for (const s of data.sources || []) {
-    if (!s?.id || !s?.path) continue;
-    const p = path.resolve(path.dirname(abs), s.path);
-    if (!fs.existsSync(p)) die(`Source not found: ${p}`);
-    sources.set(s.id, { id: s.id, name: s.name || path.basename(p), path: p, uploaded: false, ...(await probe(ffprobe, p)) });
-  }
-  const request = {
-    clips: data.clips, transitions: data.transitions, fadeIn: data.fadeIn, fadeOut: data.fadeOut, music: data.music, normalize: data.normalize,
-    cut: data.output?.cut ?? 'fast',
-    ...outputOptions(opts, { preset: 'steam', ...(data.output || {}) }),
-  };
+  const project = await resolveProject(data, {
+    baseDir: path.dirname(abs),
+    open: async (p, s) => {
+      const source = { id: s.id, name: s.name || path.basename(p), path: p, uploaded: false, ...(await probe(ffprobe, p)) };
+      sources.set(source.id, source);
+      return source;
+    },
+  });
+  if (project.missing.length) die(`Source not found: ${project.missing.join(', ')}`);
+  if (!project.clips.length) die('The project has no clips');
+  const request = projectRequest(project, outputOptions(opts, { preset: 'steam', ...project.output }));
   const getSource = (id) => sources.get(id) || null;
   const plan = planExport(getSource, request, {
     encoders: caps.encoders.length ? caps.encoders : ['libx264'], transitions: caps.transitions,

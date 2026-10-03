@@ -11,6 +11,22 @@ in/out, per-clip volume, a *music* track and loudness normalisation. The
 original single-range request (`sourceId`/`start`/`end`) still works and is
 treated as a one-clip sequence.
 
+A typical run, start to finish:
+
+1. `POST /api/open` for every video, image and music file → their source ids.
+   (Optional: `POST /api/titlecard` for a text card; `POST /api/project` to start
+   from a project the user saved in the UI.)
+2. `POST /api/plan` with the ExportRequest → size estimate, output path,
+   warnings; a 400 says exactly what is wrong.
+3. `POST /api/export` with the same body → `jobId`; follow
+   `GET /api/jobs/:id/events` (or poll `GET /api/jobs/:id`) until `status` is
+   `done`, then read `outputPath`.
+
+The UI keeps its own sequence in the browser, so what a script does through
+the API does not show up in an open UI window. To hand a sequence to the user,
+write it as a project file (see the end) and open
+`/?project=<path>`.
+
 ## Sources (input media)
 
 ### `POST /api/open`  body `{ "path": "/abs/or/relative/file.mp4" }`
@@ -30,21 +46,62 @@ Registers a file that already exists on disk. Returns a **Source**:
   "container": "mov,mp4,m4a,3gp,3g2,mj2"
 }
 ```
-`fps` is a number (r_frame_rate evaluated). `bitrate` in kbps. 404 if missing,
+`fps` is a number (r_frame_rate evaluated). `bitrate` in kbps. `uploaded` is
+true for files the app stores itself (uploads, title cards); their exports go
+to `defaultOutputDir` instead of next to the file. 404 if missing,
 400 if ffprobe finds neither video nor audio. Images (png, jpeg, webp, bmp, …)
 come back as `kind: "image"`; music files (mp3, wav, flac, ogg, m4a, …) as
 `kind: "audio"`. A video file with an audio track can also serve as music.
 
-### `POST /api/open/dialog`
+### `POST /api/open/dialog`  body `{ "multiple": false }` (optional)
 Opens the OS native file picker (PowerShell on Windows, osascript on macOS,
 zenity/kdialog on Linux). Returns a Source, `{ "cancelled": true }`, or
 `{ "unsupported": true }` when no dialog backend exists (UI then falls back
-to `<input type=file>` + upload).
+to `<input type=file>` + upload). With `"multiple": true` several files can
+be picked and the answer is `{ "sources": [Source, ...], "failed": [{ "path", "error" }] }`.
 
 ### `PUT /api/upload?name=<urlencoded filename>`  (raw body = file bytes)
 Streams the body into the temp dir and returns a Source with `"uploaded": true`.
 No multipart. Content-Length may be absent (chunked). The UI uses this for
-dropped files and for title cards it renders to PNG in the browser.
+dropped files. Temp files are deleted when the server exits; add `&card=1` to
+keep the file in `<defaultOutputDir>/title-cards/` instead (what the UI does
+with the title cards it draws, so that saved projects still find them).
+
+### `POST /api/titlecard`  → Source (an image)
+Renders a title card with ffmpeg's `drawtext` and registers it:
+```json
+{
+  "title": "Coming soon",          // up to 80 characters
+  "subtitle": "Wishlist now on Steam",   // up to 120; title, subtitle or logo is required
+  "background": "#101418", "color": "#f4f4f6", "accent": "#5a9bff",   // "#rrggbb"
+  "style": "center",               // "center" | "left" | "bar" (left aligned with an accent bar)
+  "width": 1920, "height": 1080,   // 64..4096, default 1920x1080
+  "logoSourceId": "s_img1"         // optional image source drawn above the text
+}
+```
+The PNG is written to `<defaultOutputDir>/title-cards/<title>.png` (never
+overwriting). Use the returned id as a clip: `{ "sourceId": "...", "end": 3 }`
+shows it for 3 s. 501 if this ffmpeg build has no `drawtext`. The text is sized
+to fit the width by an estimate, so check very long titles.
+
+### `POST /api/project`  body `{ "path": "trailer.ovc.json" }` or `{ "project": { ... } }`
+Opens a project file (format at the end of this document): registers every
+source it names (relative paths resolve against the project file, or against
+`"baseDir"` for an inline project; a file that is already registered keeps its
+id) and returns the project with ids the server knows:
+```json
+{
+  "app": "OpenVideoChamp", "version": 1, "name": "trailer",
+  "sources": [Source, ...],
+  "clips": [...], "transitions": [...], "fadeIn": 0.5, "fadeOut": 1, "normalize": true, "music": { ... },
+  "output": { "preset": "steam", ... },
+  "missing": ["deleted.mp4"],      // sources that could not be opened
+  "dropped": 1                     // clips left out because their source is missing
+}
+```
+`{ clips, transitions, fadeIn, fadeOut, music, normalize, ...output }` of the
+answer is a complete ExportRequest for `/api/plan` and `/api/export`. 404 if
+the file does not exist, 400 if it is not a project.
 
 ### `GET /api/sources`  → `[Source, ...]` (everything registered in this run)
 ### `GET /api/sources/:id`  → Source
@@ -99,8 +156,9 @@ anything changes to show the estimate line.
   "outputPath": null        // optional explicit output file path
 }
 ```
-Legacy shape: `{ "sourceId", "start", "end", ...options }` = one clip, no
-transitions, no music.
+Single-range shape: `{ "sourceId", "start", "end", "volume", "mute", ...everything else }`
+is the same as one entry in `clips`. A transition may also be written as just
+its name (`"fadeblack"` = 0.5 s) and `duration` defaults to 0.5.
 
 Preset targets (decimal, deliberately under the service limits):
 `discord` 10 MB, `discord50` 50 MB, `discord500` 500 MB. `steam` = no size
@@ -119,7 +177,7 @@ anything else → CRF 20 re-encode.
   "audioKbps": 96,               // 0 when muted / no audio anywhere
   "width": 1280, "height": 720,
   "fps": 60,
-  "duration": 27.5,              // total length of the output (transitions overlap, so < sum of clips)
+  "duration": 27.5,              // length of the output: transitions overlap (so < sum of clips) and every clip is rounded to whole frames
   "clips": 3, "transitions": 1, "music": true, "preview": false,
   "targetBytes": 10000000,       // null when no size target
   "estimatedBytes": 9600000,     // best guess of output size
@@ -134,6 +192,7 @@ Runs ffmpeg in the background. Only one job runs at a time; more are queued.
 With `"preview": true` the output goes to the temp dir and is meant to be
 played back through `GET /api/jobs/:id/stream`.
 
+### `GET /api/jobs`  → `[Job, ...]` (every job of this run, oldest first)
 ### `GET /api/jobs/:id`  → Job
 ```json
 {
@@ -163,7 +222,7 @@ a terminal status, then closes.
 ### `GET /api/info`
 ```json
 {
-  "version": "0.2.0",
+  "version": "0.3.0",
   "platform": "win32",
   "ffmpeg": { "path": "C:\\...\\ffmpeg.exe", "version": "6.1.1" },
   "encoders": ["libx264", "h264_nvenc"],   // only encoders verified to actually work on this machine
@@ -173,7 +232,7 @@ a terminal status, then closes.
 }
 ```
 ### `GET /api/docs`  — this document, as text/markdown (what the "copy agent instructions" button copies)
-### `GET /`  — the UI. `GET /?path=<urlencoded>` opens that file on load (used by the CLI).
+### `GET /`  — the UI. `GET /?path=<urlencoded>` opens that media file on load, `GET /?project=<urlencoded>` that project file (used by the CLI: `ovc clip.mp4`, `ovc trailer.ovc.json`).
 
 ## Export rules (what the planner does)
 - Each clip's `duration = end - start`; reject if < 0.1 s or outside the source
@@ -190,12 +249,19 @@ a terminal status, then closes.
 - **Everything else is one `-filter_complex` graph**: every clip is seeked with
   `-ss`/`-t` input options (frame accurate on re-encode), conformed with
   `setpts=PTS-STARTPTS,fps=F,scale…,setsar=1,format=yuv420p` and padded/trimmed
-  to its exact length; images are `-loop 1` inputs. Clips with a different
+  to its length; images are `-loop 1` inputs. Clips with a different
   aspect ratio than the output canvas are letter/pillarboxed. Audio is resampled
   to 48 kHz stereo, scaled by `volume`, padded to the clip length and given 5 ms
   edge fades (no clicks at cuts); silent clips get `anullsrc`. A `cut` is a
   `concat`; any other transition is `xfade=transition=T:duration=D:offset=…` plus
-  `acrossfade`. Then `fade`/`afade` for fadeIn/fadeOut, the music (`volume`,
+  `acrossfade`.
+- **The timeline is counted in whole output frames.** Each clip is
+  `round(duration × fps)` frames long (`trim=end_frame=N`) and its audio is cut
+  to exactly the same length in samples (`apad=whole_len`/`atrim=end_sample`),
+  transitions likewise; otherwise the audio, which can be cut anywhere, would
+  run a little further ahead of the picture at every clip boundary. All clips
+  are put on one timebase (`settb=AVTB`) so that a transition can follow a cut.
+  `Plan.duration` is this frame-exact length. Then `fade`/`afade` for fadeIn/fadeOut, the music (`volume`,
   `afade`, `apad`/`atrim` to the total, `-stream_loop -1` when looping,
   `-ss` for `start`) mixed in with `amix=normalize=0` or used alone, and
   `loudnorm=I=-14:TP=-1.5:LRA=11` when `normalize` is set.
@@ -225,7 +291,8 @@ a terminal status, then closes.
 - Output name: `<name>_cut.mp4`, `<name>_10MB.mp4`, `<name>_steam.mp4` (with `_edit_`
   inserted for multi-clip sequences, after the first clip's name); never
   overwrite — append `-2`, `-3`, ….  Directory: next to the first clip's source when it
-  is a real file; `defaultOutputDir` for uploads. `outputPath` in the request overrides
+  is the user's own file; `defaultOutputDir` for uploads and title cards
+  (`OVC_OUTPUT_DIR` moves that directory). `outputPath` in the request overrides
   the name, but is subject to the same no-overwrite rule and must not be a source file.
 - ffmpeg writes to `<name>.part<ext>` and the file is renamed on success, so a failed
   or cancelled job never leaves a half-written file under the final name.
@@ -238,8 +305,9 @@ a terminal status, then closes.
 ## Project files
 
 The UI's *Project → Save* writes a JSON file that `ovc render` can also run
-headlessly. Sources are referenced by path (relative paths resolve against the
-project file):
+headlessly, `POST /api/project` opens for a script and `/?project=<path>` (or
+`ovc trailer.ovc.json`) opens in the UI. Sources are referenced by path
+(relative paths resolve against the project file):
 ```json
 {
   "app": "OpenVideoChamp", "version": 1, "name": "trailer",

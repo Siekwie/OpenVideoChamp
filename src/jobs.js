@@ -47,6 +47,10 @@ export class Jobs extends EventEmitter {
     return job ? this.toJSON(job) : null;
   }
 
+  list() {
+    return [...this.jobs.values()].map((job) => this.toJSON(job));
+  }
+
   // True when a queued/running job will write this path (so the planner won't pick the same name twice).
   reserved(outputPath) {
     return [...this.jobs.values()].some((j) => !TERMINAL.has(j.status) && j.outputPath === outputPath);

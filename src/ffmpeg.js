@@ -41,9 +41,9 @@ export function locate() {
   return { ffmpeg, ffprobe };
 }
 
-export function run(bin, args, { timeout = 0 } = {}) {
+export function run(bin, args, { timeout = 0, cwd } = {}) {
   return new Promise((resolve, reject) => {
-    execFile(bin, args, { timeout, maxBuffer: 64 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
+    execFile(bin, args, { timeout, cwd, maxBuffer: 64 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
       if (err) {
         err.message = (stderr || '').trim().split('\n').pop() || err.message;
         return reject(err);
@@ -78,7 +78,8 @@ export async function probe(ffprobe, file) {
   const info = JSON.parse(stdout);
   const streams = info.streams || [];
   const a = streams.find((s) => s.codec_type === 'audio');
-  const v = streams.find((s) => s.codec_type === 'video' && !s.disposition?.attached_pic);
+  // A stream without dimensions is a file ffprobe only recognised by its name (a broken .png, say).
+  const v = streams.find((s) => s.codec_type === 'video' && !s.disposition?.attached_pic && s.width > 0 && s.height > 0);
   if (!v && !a) throw Object.assign(new Error('No video or audio stream found in file'), { status: 400 });
   const format = info.format.format_name || '';
   const size = Number(info.format.size) || 0;

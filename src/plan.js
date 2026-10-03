@@ -69,7 +69,9 @@ function num(value, name, { min = -Infinity, max = Infinity, fallback } = {}) {
 const bool = (value, fallback = false) => (value == null ? fallback : value === true || value === 'true' || value === 1);
 const round3 = (t) => Math.round(t * 1000) / 1000;
 // Numbers inside a filter graph: fixed decimals, no exponent notation, no trailing zeros.
-const f3 = (n) => { const s = round3(n).toFixed(3); return s.includes('.') ? s.replace(/\.?0+$/, '') || '0' : s; };
+const fixed = (n, digits) => { const s = n.toFixed(digits); return s.includes('.') ? s.replace(/\.?0+$/, '') || '0' : s; };
+const f3 = (n) => fixed(n, 3);
+const f6 = (n) => fixed(n, 6); // frame-derived times (n / fps) need more than milliseconds
 
 function normalizeClip(input, index) {
   if (!input || typeof input !== 'object') fail(`Clip ${index + 1} must be an object`);
@@ -104,7 +106,7 @@ export function normalizeRequest(input = {}) {
   if (!input || typeof input !== 'object') fail('Expected a JSON object');
   const legacy = !Array.isArray(input.clips) || !input.clips.length;
   const clips = legacy
-    ? [normalizeClip({ sourceId: input.sourceId, start: input.start, end: input.end }, 0)]
+    ? [normalizeClip({ sourceId: input.sourceId, start: input.start, end: input.end, volume: input.volume, mute: input.mute }, 0)]
     : input.clips.map(normalizeClip);
   if (clips.length > MAX_CLIPS) fail(`At most ${MAX_CLIPS} clips per export`);
   const rawTr = Array.isArray(input.transitions) ? input.transitions : [];
@@ -198,6 +200,22 @@ export function resolveSequence(req, getSource, { transitions: available = ALL_T
     music = { ...req.music, source };
   }
   return { clips, transitions, total, music, fadeIn: req.fadeIn, fadeOut: req.fadeOut, normalize: req.normalize };
+}
+
+// The sequence in whole output frames. Every clip and transition is rounded to frames once, here, and
+// both the video and the audio graph are cut to those lengths: a video stream can only be whole frames
+// long, so audio cut to the nominal length would drift a little further ahead at every clip boundary.
+export function timeline(seq, fps) {
+  const frames = seq.clips.map((c) => Math.max(1, Math.round(c.duration * fps)));
+  const overlap = seq.transitions.map((t) => (t.type === 'cut' ? 0 : Math.max(1, Math.round(t.duration * fps))));
+  // Rounding can push the two transitions around a short clip one frame past its length.
+  frames.forEach((n, i) => {
+    while ((overlap[i - 1] || 0) + (overlap[i] || 0) > n) {
+      if ((overlap[i - 1] || 0) >= (overlap[i] || 0)) overlap[i - 1]--; else overlap[i]--;
+    }
+  });
+  const total = frames.reduce((s, n) => s + n, 0) - overlap.reduce((s, n) => s + n, 0);
+  return { frames, overlap, total, duration: total / fps };
 }
 
 const fmtMB = (bytes) => `~${bytes >= 1e8 ? Math.round(bytes / 1e6) : (bytes / 1e6).toFixed(1)} MB`;
@@ -321,6 +339,7 @@ export function planExport(sources, input, { encoders = ['libx264'], transitions
     plan.width = dims.width;
     plan.height = dims.height;
     plan.fps = fps;
+    plan.duration = round3(timeline(seq, fps).duration); // what the file will really be: whole frames
 
     const dimsStr = `${dims.width}×${dims.height} · ${fmtFps(fps)} fps`;
     const audioStr = muted ? ', no audio' : ` + ${plan.audioKbps} kbps audio`;
@@ -353,7 +372,9 @@ export function planExport(sources, input, { encoders = ['libx264'], transitions
     base = path.basename(p, path.extname(p));
   } else {
     const tag = targetBytes ? `${targetBytes / 1e6}MB` : req.preset === 'steam' ? 'steam' : 'cut';
-    dir = first.uploaded ? defaultOutputDir : path.dirname(first.path);
+    // Files the app keeps itself (uploads in the temp dir, title cards under the output dir) are no place for exports.
+    const own = first.uploaded || path.resolve(first.path).startsWith(path.resolve(defaultOutputDir) + path.sep);
+    dir = own ? defaultOutputDir : path.dirname(first.path);
     const stem = path.basename(first.name, path.extname(first.name));
     base = `${stem}_${seq.clips.length > 1 ? 'edit_' : ''}${tag}`;
   }
@@ -374,72 +395,80 @@ function fitFilters(src, W, H) {
 const AFORMAT = `aresample=${AUDIO_RATE}:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo`;
 
 // filter_complex for the sequence. `withAudio=false` builds the video-only graph for two-pass pass 1.
+// Returns { graph, video, audio, duration }: the graph, its output labels and its exact length in seconds.
 export function buildFilterGraph(plan, seq, { withAudio = true } = {}) {
   const { width: W, height: H, fps: F } = plan;
-  const T = seq.total;
+  const tl = timeline(seq, F);
+  const T = tl.duration;
+  const sec = (frames) => f6(frames / F);
+  const samples = (frames) => Math.round((frames / F) * AUDIO_RATE);
+  const fadeOutAt = (d) => f6(Math.max(0, T - d));
   const parts = [];
   const vLabels = [], aLabels = [];
   // "Music only" drops the clip audio entirely; building it would leave an unconnected filter output.
   const clipAudio = withAudio && !(seq.music && seq.music.mode === 'replace');
 
   seq.clips.forEach((c, k) => {
-    const d = f3(c.duration);
-    const video = ['setpts=PTS-STARTPTS', `fps=${f3(F)}`, ...fitFilters(c.source, W, H), 'setsar=1', 'format=yuv420p', 'tpad=stop=-1', `trim=duration=${d}`];
+    const n = tl.frames[k];
+    // settb: concat hands on a 1/1000000 timebase and xfade refuses inputs whose timebases differ,
+    // so a cut followed by a transition only works when every clip is on that timebase from the start.
+    const video = ['setpts=PTS-STARTPTS', `fps=${f3(F)}`, ...fitFilters(c.source, W, H), 'setsar=1', 'format=yuv420p',
+      'tpad=stop=-1:stop_mode=clone', `trim=end_frame=${n}`, 'settb=AVTB'];
     parts.push(`[${k}:v]${video.join(',')}[v${k}]`);
     vLabels.push(`[v${k}]`);
     if (!clipAudio) return;
+    const len = samples(n);
     if (c.audible) {
       const vol = c.volume !== 1 ? [`volume=${f3(c.volume)}`] : [];
       // 5 ms edge fades remove clicks at hard cuts without changing the clip length.
-      const audio = ['asetpts=PTS-STARTPTS', AFORMAT, ...vol, `apad=whole_dur=${d}`, `atrim=duration=${d}`, 'afade=t=in:d=0.005', `afade=t=out:st=${f3(c.duration - 0.005)}:d=0.005`];
+      const audio = ['asetpts=PTS-STARTPTS', AFORMAT, ...vol, `apad=whole_len=${len}`, `atrim=end_sample=${len}`, 'afade=t=in:d=0.005', `afade=t=out:st=${f6(Math.max(0, n / F - 0.005))}:d=0.005`];
       parts.push(`[${k}:a]${audio.join(',')}[a${k}]`);
     } else {
-      parts.push(`anullsrc=r=${AUDIO_RATE}:cl=stereo,atrim=duration=${d}[a${k}]`);
+      parts.push(`anullsrc=r=${AUDIO_RATE}:cl=stereo,atrim=end_sample=${len}[a${k}]`);
     }
     aLabels.push(`[a${k}]`);
   });
 
   // Chain the clips: a cut is a concat, anything else an xfade/acrossfade at the running offset.
-  let v = vLabels[0], a = aLabels[0], acc = seq.clips[0].duration;
+  let v = vLabels[0], a = aLabels[0], acc = tl.frames[0];
   seq.transitions.forEach((t, i) => {
-    const k = i + 1;
-    if (t.type === 'cut') {
+    const k = i + 1, o = tl.overlap[i];
+    if (!o) {
       parts.push(`${v}${vLabels[k]}concat=n=2:v=1:a=0[x${k}]`);
       if (clipAudio) parts.push(`${a}${aLabels[k]}concat=n=2:v=0:a=1[y${k}]`);
-      acc += seq.clips[k].duration;
     } else {
-      parts.push(`${v}${vLabels[k]}xfade=transition=${t.type}:duration=${f3(t.duration)}:offset=${f3(acc - t.duration)}[x${k}]`);
-      if (clipAudio) parts.push(`${a}${aLabels[k]}acrossfade=d=${f3(t.duration)}:c1=tri:c2=tri[y${k}]`);
-      acc += seq.clips[k].duration - t.duration;
+      parts.push(`${v}${vLabels[k]}xfade=transition=${t.type}:duration=${sec(o)}:offset=${sec(acc - o)}[x${k}]`);
+      if (clipAudio) parts.push(`${a}${aLabels[k]}acrossfade=ns=${samples(o)}:c1=tri:c2=tri[y${k}]`);
     }
+    acc += tl.frames[k] - o;
     v = `[x${k}]`;
     a = `[y${k}]`;
   });
 
   const vTail = [];
   if (seq.fadeIn > 0) vTail.push(`fade=t=in:d=${f3(seq.fadeIn)}`);
-  if (seq.fadeOut > 0) vTail.push(`fade=t=out:st=${f3(T - seq.fadeOut)}:d=${f3(seq.fadeOut)}`);
+  if (seq.fadeOut > 0) vTail.push(`fade=t=out:st=${fadeOutAt(seq.fadeOut)}:d=${f3(seq.fadeOut)}`);
   if (vTail.length) { parts.push(`${v}${vTail.join(',')}[vout]`); v = '[vout]'; }
-  if (!withAudio) return { graph: parts.join(';'), video: v, audio: null };
+  if (!withAudio) return { graph: parts.join(';'), video: v, audio: null, duration: T };
 
   if (seq.music) {
     const m = seq.music, M = seq.clips.length;
     const chain = ['asetpts=PTS-STARTPTS', AFORMAT];
     if (m.volume !== 1) chain.push(`volume=${f3(m.volume)}`);
     if (m.fadeIn > 0) chain.push(`afade=t=in:d=${f3(m.fadeIn)}`);
-    if (m.fadeOut > 0) chain.push(`afade=t=out:st=${f3(T - m.fadeOut)}:d=${f3(m.fadeOut)}`);
-    chain.push(`apad=whole_dur=${f3(T)}`, `atrim=duration=${f3(T)}`);
+    if (m.fadeOut > 0) chain.push(`afade=t=out:st=${fadeOutAt(m.fadeOut)}:d=${f3(m.fadeOut)}`);
+    chain.push(`apad=whole_len=${samples(tl.total)}`, `atrim=end_sample=${samples(tl.total)}`);
     parts.push(`[${M}:a]${chain.join(',')}[m]`);
     if (m.mode === 'replace') a = '[m]';
     else { parts.push(`${a}[m]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[mix]`); a = '[mix]'; }
   }
   const aTail = [];
   if (seq.fadeIn > 0) aTail.push(`afade=t=in:d=${f3(seq.fadeIn)}`);
-  if (seq.fadeOut > 0) aTail.push(`afade=t=out:st=${f3(T - seq.fadeOut)}:d=${f3(seq.fadeOut)}`);
+  if (seq.fadeOut > 0) aTail.push(`afade=t=out:st=${fadeOutAt(seq.fadeOut)}:d=${f3(seq.fadeOut)}`);
   // loudnorm works internally at 192 kHz and would output that; bring it back down.
   if (seq.normalize) aTail.push('loudnorm=I=-14:TP=-1.5:LRA=11', `aresample=${AUDIO_RATE}`);
   if (aTail.length) { parts.push(`${a}${aTail.join(',')}[aout]`); a = '[aout]'; }
-  return { graph: parts.join(';'), video: v, audio: a };
+  return { graph: parts.join(';'), video: v, audio: a, duration: T };
 }
 
 // Returns one ffmpeg argv array per pass.
@@ -472,7 +501,7 @@ export function buildArgs(plan, sources, input, { passLogFile, nullDevice, trans
   const withAudio = plan.audioKbps > 0;
   const full = buildFilterGraph(plan, seq, { withAudio });
   const mapsFor = (g, useAudio) => ['-filter_complex', g.graph, '-map', g.video, ...(useAudio && g.audio ? ['-map', g.audio] : [])];
-  const common = ['-t', f3(plan.duration)];
+  const common = ['-t', f6(full.duration)];
   const x264 = plan.encoder === 'libx264' ? ['-preset', req.preview ? 'ultrafast' : X264_PRESET[req.speed]] : [];
   const video = ['-c:v', plan.encoder, ...x264];
   const pix = ['-pix_fmt', plan.encoder === 'h264_qsv' ? 'nv12' : 'yuv420p'];

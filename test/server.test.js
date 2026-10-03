@@ -13,6 +13,8 @@ const WORK = path.join(ROOT, 'test', '.work');
 const SAMPLE = path.join(WORK, 'sample.mp4');
 const CARD = path.join(WORK, 'card.png');
 const MUSIC = path.join(WORK, 'music.wav');
+const OUT = path.join(WORK, 'out'); // stands in for ~/Videos/OpenVideoChamp
+const ENV = { ...process.env, OVC_OUTPUT_DIR: OUT };
 const { ffmpeg, ffprobe } = locate();
 
 let proc, base, sourceId;
@@ -38,12 +40,13 @@ async function waitForJob(id, done, timeoutMs = 40_000) {
   }
 }
 
-const probeField = (file, entries) => execFileSync(ffprobe, ['-v', 'error', '-show_entries', entries, '-of', 'csv=p=0', file]).toString().trim();
+const probeField = (file, entries) => execFileSync(ffprobe, ['-v', 'error', '-show_entries', entries, '-of', 'csv=p=0', file]).toString().trim().replace(/\r/g, '');
 const duration = (file) => Number(probeField(file, 'format=duration'));
 
 before(async () => {
   fs.mkdirSync(WORK, { recursive: true });
   for (const f of fs.readdirSync(WORK)) if (f.startsWith('sample_')) fs.rmSync(path.join(WORK, f));
+  fs.rmSync(OUT, { recursive: true, force: true });
   if (!fs.existsSync(SAMPLE)) {
     execFileSync(ffmpeg, ['-y', '-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=1280x720:rate=30',
       '-f', 'lavfi', '-i', 'sine=frequency=440', '-t', '12', '-c:v', 'libx264', '-preset', 'ultrafast', '-c:a', 'aac', SAMPLE]);
@@ -54,7 +57,7 @@ before(async () => {
   if (!fs.existsSync(MUSIC)) {
     execFileSync(ffmpeg, ['-y', '-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'sine=frequency=220:sample_rate=44100', '-t', '4', MUSIC]);
   }
-  proc = spawn(process.execPath, [path.join(ROOT, 'bin', 'ovc.js'), '--no-open', '--port', '0'], { cwd: ROOT, stdio: ['ignore', 'pipe', 'inherit'] });
+  proc = spawn(process.execPath, [path.join(ROOT, 'bin', 'ovc.js'), '--no-open', '--port', '0'], { cwd: ROOT, env: ENV, stdio: ['ignore', 'pipe', 'inherit'] });
   base = await new Promise((resolve, reject) => {
     let out = '';
     proc.stdout.on('data', (d) => {
@@ -77,7 +80,7 @@ test('GET /api/info', async () => {
   assert.ok(Array.isArray(data.encoders));
   assert.ok(Array.isArray(data.transitions) && data.transitions.includes('fade') && data.transitions.includes('wipeleft'));
   assert.equal(typeof data.dialog, 'boolean');
-  assert.ok(data.defaultOutputDir);
+  assert.equal(data.defaultOutputDir, OUT); // OVC_OUTPUT_DIR
 });
 
 test('POST /api/open probes the file', async () => {
@@ -205,7 +208,7 @@ test('PUT /api/upload (chunked body) registers an uploaded source', async () => 
   assert.equal(data.json.size, fs.statSync(SAMPLE).size);
   const plan = await api('POST', '/api/plan', { sourceId: data.json.id, start: 0, end: 5, preset: 'steam' });
   assert.equal(plan.status, 200);
-  assert.ok(plan.data.outputPath.endsWith(path.join('OpenVideoChamp', 'my clip_steam.mp4')), plan.data.outputPath);
+  assert.equal(plan.data.outputPath, path.join(OUT, 'my clip_steam.mp4'));
 });
 
 test('cancelling a running job leaves no output or .part file and never touches an existing file', async () => {
@@ -347,4 +350,107 @@ test('preview: draft render lands in the temp dir and streams back with Range su
   const legacy = await api('POST', '/api/plan', { sourceId, start: 1, end: 3, preset: 'cut', cut: 'fast' });
   assert.equal(legacy.status, 200);
   assert.equal(legacy.data.mode, 'copy');
+});
+
+test('export: a transition after a hard cut works, and many odd-length clips keep audio and video the same length', async () => {
+  // 0.517 s is not a whole number of frames; cut to the nominal length the audio would end ~0.2 s before the video
+  const clips = Array.from({ length: 12 }, (_, i) => ({ sourceId, start: 1 + i * 0.7, end: 1 + i * 0.7 + 0.517 }));
+  const transitions = clips.slice(1).map((_, i) => (i === 5 ? { type: 'wipeleft', duration: 0.2 } : { type: 'cut' }));
+  const { status, data } = await api('POST', '/api/export', { clips, transitions, preset: 'cut', cut: 'precise', speed: 'fast', resolution: 360 });
+  assert.equal(status, 200, JSON.stringify(data));
+  const job = await waitForJob(data.jobId, (j) => ['done', 'error', 'cancelled'].includes(j.status), 90_000);
+  assert.equal(job.status, 'done', job.log);
+  assert.equal(job.plan.duration, 6.2); // (12 * 16 - 6) frames at 30 fps
+  const [video, audio] = probeField(job.outputPath, 'stream=duration').split('\n').map(Number);
+  assert.ok(Math.abs(video - 6.2) < 0.04, `video ${video}`);
+  assert.ok(Math.abs(audio - video) < 0.04, `audio ${audio} vs video ${video}`);
+});
+
+test('GET /api/jobs lists every job of this run', async () => {
+  const { status, data } = await api('GET', '/api/jobs');
+  assert.equal(status, 200);
+  assert.ok(data.length >= 5);
+  assert.ok(data.every((j) => /^j_/.test(j.id) && j.status && j.plan));
+  assert.ok(data.some((j) => j.preview) && data.some((j) => j.status === 'cancelled'));
+});
+
+test('POST /api/titlecard renders a card that is kept outside the temp dir; exports do not land next to it', async (t) => {
+  const { status, data } = await api('POST', '/api/titlecard', { title: 'Coming 100% soon: it\'s "here"', subtitle: 'Wishlist now', style: 'bar', accent: '#ff8800', logoSourceId: cardId });
+  if (status === 501) return t.skip(data.error);
+  assert.equal(status, 200, JSON.stringify(data));
+  assert.equal(data.kind, 'image');
+  assert.equal(data.width, 1920);
+  assert.equal(data.height, 1080);
+  assert.equal(data.uploaded, true);
+  assert.equal(path.dirname(data.path), path.join(OUT, 'title-cards'));
+  assert.equal(data.name, 'Coming 100 soon its here.png');
+  // the same title again gets its own file
+  const again = await api('POST', '/api/titlecard', { title: 'Coming 100% soon: it\'s "here"', width: 1280, height: 720 });
+  assert.equal(again.data.name, 'Coming 100 soon its here-2.png');
+  assert.equal(again.data.height, 720);
+  const plan = await api('POST', '/api/plan', { clips: [{ sourceId: data.id, end: 3 }, { sourceId, start: 0, end: 2 }], transitions: ['fadeblack'], preset: 'steam' });
+  assert.equal(plan.status, 200, JSON.stringify(plan.data));
+  assert.equal(path.dirname(plan.data.outputPath), OUT);
+  for (const bad of [{}, { title: 'x', background: 'red' }, { title: 'x', style: 'fancy' }, { title: 'x', width: 10 }, { title: 'x', logoSourceId: sourceId }]) {
+    assert.equal((await api('POST', '/api/titlecard', bad)).status, 400, JSON.stringify(bad));
+  }
+});
+
+test('PUT /api/upload?card=1 keeps the file in the title card folder; a broken one is not left behind', async () => {
+  const put = (name, body) => fetch(`${base}/api/upload?card=1&name=${encodeURIComponent(name)}`, { method: 'PUT', body });
+  const res = await put('logo.png', fs.readFileSync(CARD));
+  assert.equal(res.status, 200);
+  const src = await res.json();
+  assert.equal(src.path, path.join(OUT, 'title-cards', 'logo.png'));
+  assert.equal(src.kind, 'image');
+  assert.equal((await put('broken.png', 'not an image')).status, 400);
+  assert.ok(!fs.existsSync(path.join(OUT, 'title-cards', 'broken.png')));
+});
+
+test('POST /api/project opens a project file, re-registers its media and returns a ready ExportRequest; ovc render runs it', async () => {
+  const project = {
+    app: 'OpenVideoChamp', version: 1,
+    sources: [{ id: 'a', path: 'sample.mp4' }, { id: 'c', path: 'card.png' }, { id: 'm', path: 'music.wav' }, { id: 'gone', path: 'deleted.mp4', name: 'deleted.mp4' }],
+    clips: [{ sourceId: 'a', start: 1, end: 3 }, { sourceId: 'gone', start: 0, end: 2 }, { sourceId: 'c', end: 2 }],
+    transitions: [{ type: 'cut' }, { type: 'fade', duration: 0.5 }],
+    fadeOut: 0.5, music: { sourceId: 'm', volume: 0.4 },
+    output: { preset: 'discord', speed: 'fast', nonsense: true },
+  };
+  const file = path.join(WORK, 'trailer.ovc.json');
+  fs.writeFileSync(file, JSON.stringify(project));
+  const { status, data } = await api('POST', '/api/project', { path: file });
+  assert.equal(status, 200, JSON.stringify(data));
+  assert.equal(data.name, 'trailer');
+  assert.deepEqual(data.missing, ['deleted.mp4']);
+  assert.equal(data.dropped, 1);
+  assert.equal(data.sources.length, 3);
+  // paths are relative to the project file, and media that is already open keeps its id
+  assert.deepEqual(data.sources.map((s) => s.id), [sourceId, cardId, musicId]);
+  assert.deepEqual(data.clips, [{ sourceId, start: 1, end: 3 }, { sourceId: cardId, end: 2 }]);
+  assert.deepEqual(data.transitions, [{ type: 'fade', duration: 0.5 }]); // the one in front of the surviving clip
+  assert.equal(data.music.sourceId, musicId);
+  assert.deepEqual(data.output, { preset: 'discord', speed: 'fast' });
+  const { clips, transitions, fadeIn, fadeOut, music, normalize, output } = data;
+  const plan = await api('POST', '/api/plan', { clips, transitions, fadeIn, fadeOut, music, normalize, ...output });
+  assert.equal(plan.status, 200, JSON.stringify(plan.data));
+  assert.equal(plan.data.duration, 3.5);
+  assert.equal(plan.data.targetBytes, 10_000_000);
+
+  // the same thing inline, with absolute paths
+  const inline = await api('POST', '/api/project', { project: { ...project, sources: [{ id: 'a', path: SAMPLE }], clips: [{ sourceId: 'a', start: 0, end: 1 }], music: null } });
+  assert.equal(inline.status, 200);
+  assert.equal(inline.data.clips[0].sourceId, sourceId);
+  assert.equal((await api('POST', '/api/project', { path: path.join(WORK, 'nope.json') })).status, 404);
+  assert.equal((await api('POST', '/api/project', { project: { clips: [] } })).status, 400);
+
+  // headless: a missing source stops the render, a complete project renders
+  const cli = (args) => execFileSync(process.execPath, [path.join(ROOT, 'bin', 'ovc.js'), 'render', ...args], { cwd: ROOT, env: ENV, stdio: ['ignore', 'pipe', 'pipe'] }).toString().trim();
+  assert.throws(() => cli([file]), /Source not found: deleted\.mp4/);
+  project.sources.pop();
+  project.clips.splice(1, 1);
+  project.transitions = [{ type: 'fade', duration: 0.5 }];
+  fs.writeFileSync(file, JSON.stringify(project));
+  const out = cli([file, '--preset', 'cut', '--res', '360', '--out', path.join(WORK, 'sample_render.mp4')]);
+  assert.equal(out, path.join(WORK, 'sample_render.mp4'));
+  assert.ok(Math.abs(duration(out) - 3.5) <= 0.15, `duration ${duration(out)}`);
 });

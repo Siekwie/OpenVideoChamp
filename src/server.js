@@ -10,10 +10,12 @@ import { probe, keyframes as probeKeyframes, version as ffmpegVersion } from './
 import { planExport, ALL_TRANSITIONS } from './plan.js';
 import { Jobs, isTerminal } from './jobs.js';
 import { dialogAvailable, openFileDialog, reveal } from './dialog.js';
+import { resolveProject } from './project.js';
+import { normalizeCard, renderTitleCard } from './titlecard.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 export const VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version;
-export const DEFAULT_OUTPUT_DIR = path.join(os.homedir(), process.platform === 'darwin' ? 'Movies' : 'Videos', 'OpenVideoChamp');
+export const DEFAULT_OUTPUT_DIR = path.resolve(process.env.OVC_OUTPUT_DIR || path.join(os.homedir(), process.platform === 'darwin' ? 'Movies' : 'Videos', 'OpenVideoChamp'));
 
 const JSON_LIMIT = 1024 * 1024;
 const MEDIA_TYPES = {
@@ -83,21 +85,21 @@ function sameOrigin(req) {
   try { return new URL(origin).host === req.headers.host; } catch { return false; }
 }
 
-// Does this request describe a plain single-clip fast cut (the only case that needs keyframes)?
-function wantsCopy(body) {
-  const clips = Array.isArray(body.clips) ? body.clips : null;
-  if (clips && clips.length !== 1) return null;
-  if ((body.preset ?? 'cut') !== 'cut' || (body.cut ?? 'fast') !== 'fast' || body.music || body.fadeIn || body.fadeOut || body.preview || body.normalize) return null;
-  const clip = clips ? clips[0] : body;
-  if (clip && clip.volume != null && Number(clip.volume) !== 1) return null;
-  return clip ? clip.sourceId : null;
+// A free file name in `dir`: "name.ext", then "name-2.ext", ...
+function freeName(dir, name) {
+  const ext = path.extname(name), stem = path.basename(name, ext);
+  let file = path.join(dir, name);
+  for (let n = 2; fs.existsSync(file); n++) file = path.join(dir, `${stem}-${n}${ext}`);
+  return file;
 }
 
-export function createServer({ ffmpeg, ffprobe, capabilities, tmpDir, publicDir = path.join(ROOT, 'public') }) {
+export function createServer({ ffmpeg, ffprobe, capabilities, tmpDir, publicDir = path.join(ROOT, 'public'), outputDir = DEFAULT_OUTPUT_DIR }) {
   const caps = capabilities || { encoders: ['libx264'], transitions: ALL_TRANSITIONS, ready: Promise.resolve() };
   const sources = new Map(); // id -> Source
   const keyframeCache = new Map(); // id -> Promise<number[]>
   const previewDir = path.join(tmpDir, 'previews');
+  // Title cards are kept outside the temp dir so that a saved project still finds them after a restart.
+  const cardDir = path.join(outputDir, 'title-cards');
   const jobs = new Jobs({ ffmpeg, tmpDir, capabilities: caps });
   const versionPromise = ffmpegVersion(ffmpeg).catch(() => 'unknown');
 
@@ -131,18 +133,22 @@ export function createServer({ ffmpeg, ffprobe, capabilities, tmpDir, publicDir 
 
   async function plan(body) {
     if (!body || typeof body !== 'object') throw new HttpError(400, 'Expected a JSON object');
-    // Only a stream-copy plan needs keyframes; don't make every plan wait for the scan of a huge file.
-    const copyId = wantsCopy(body);
-    const keyframes = copyId && sources.has(String(copyId)) ? await keyframeCache.get(String(copyId)) : [];
-    return planExport(getSource, body, {
+    const opts = {
       encoders: caps.encoders,
       transitions: caps.transitions,
-      defaultOutputDir: DEFAULT_OUTPUT_DIR,
+      defaultOutputDir: outputDir,
       previewDir,
       exists: (p) => fs.existsSync(p) || jobs.reserved(p),
-      keyframes,
-    });
+    };
+    const planned = planExport(getSource, body, opts);
+    if (planned.mode !== 'copy') return planned;
+    // Only a stream copy needs keyframes (snap warning, size estimate); nothing else should wait for
+    // the keyframe scan of a huge file.
+    const clip = Array.isArray(body.clips) && body.clips.length ? body.clips[0] : body;
+    return planExport(getSource, body, { ...opts, keyframes: await keyframeCache.get(clip.sourceId) });
   }
+
+  const byPath = (file) => [...sources.values()].find((s) => s.path === file);
 
   const routes = [
     ['GET', /^\/api\/info$/, async () => {
@@ -151,7 +157,7 @@ export function createServer({ ffmpeg, ffprobe, capabilities, tmpDir, publicDir 
       return {
         version: VERSION, platform: process.platform,
         ffmpeg: { path: ffmpeg, version: await versionPromise },
-        encoders: caps.encoders, transitions: caps.transitions, dialog: dialogAvailable(), defaultOutputDir: DEFAULT_OUTPUT_DIR,
+        encoders: caps.encoders, transitions: caps.transitions, dialog: dialogAvailable(), defaultOutputDir: outputDir,
       };
     }],
     ['GET', /^\/api\/docs$/, (req, res) => sendFile(res, path.join(ROOT, 'docs', 'API.md'), 'text/markdown; charset=utf-8')],
@@ -160,17 +166,59 @@ export function createServer({ ffmpeg, ffprobe, capabilities, tmpDir, publicDir 
       if (typeof body?.path !== 'string' || !body.path) throw new HttpError(400, 'Missing "path"');
       return register(body.path);
     }],
-    ['POST', /^\/api\/open\/dialog$/, async () => {
-      const r = await openFileDialog();
-      return r.path ? register(r.path) : r;
+    ['POST', /^\/api\/open\/dialog$/, async (req) => {
+      const multiple = Boolean((await readJson(req))?.multiple);
+      const r = await openFileDialog({ multiple });
+      if (!r.paths) return r;
+      if (!multiple) return register(r.paths[0]);
+      const opened = [], failed = [];
+      for (const file of r.paths) {
+        try { opened.push(await register(file)); } catch (e) { failed.push({ path: file, error: e.message }); }
+      }
+      return { sources: opened, failed };
     }],
     ['PUT', /^\/api\/upload$/, async (req, res, url) => {
       let name = path.basename(url.searchParams.get('name') || '').replace(/[\\/:*?"<>|\0]/g, '_');
       if (!name || name === '.' || name === '..') name = 'upload.mp4';
-      const dir = fs.mkdtempSync(path.join(tmpDir, 'u-'));
-      const file = path.join(dir, name);
-      await pipeline(req, fs.createWriteStream(file));
-      return register(file, { uploaded: true, name });
+      let file;
+      if (url.searchParams.get('card')) {
+        fs.mkdirSync(cardDir, { recursive: true });
+        file = freeName(cardDir, name);
+      } else file = path.join(fs.mkdtempSync(path.join(tmpDir, 'u-')), name);
+      // A kept file that turns out to be broken or is not media must not pile up in the card folder.
+      try {
+        await pipeline(req, fs.createWriteStream(file));
+        return await register(file, { uploaded: true, name });
+      } catch (e) {
+        if (path.dirname(file) === cardDir) fs.rmSync(file, { force: true });
+        throw e;
+      }
+    }],
+    ['POST', /^\/api\/titlecard$/, async (req) => {
+      const body = await readJson(req);
+      const card = normalizeCard(body);
+      const logo = body.logoSourceId != null ? getSource(body.logoSourceId) : null;
+      if (logo && logo.kind !== 'image') throw new HttpError(400, `Logo: "${logo.name}" is not an image`);
+      fs.mkdirSync(cardDir, { recursive: true });
+      const stem = (card.title || card.subtitle || 'title card').replace(/[^\w\- ]+/g, '').trim().slice(0, 40) || 'title card';
+      const file = freeName(cardDir, `${stem}.png`);
+      await renderTitleCard(ffmpeg, card, file, { logo, workDir: fs.mkdtempSync(path.join(tmpDir, 'card-')) });
+      return register(file, { uploaded: true });
+    }],
+    ['POST', /^\/api\/project$/, async (req) => {
+      const body = await readJson(req);
+      let data = body?.project;
+      let baseDir = typeof body?.baseDir === 'string' && body.baseDir ? body.baseDir : process.cwd();
+      if (typeof body?.path === 'string' && body.path) {
+        const file = path.resolve(body.path);
+        try { data = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) {
+          throw new HttpError(e.code === 'ENOENT' ? 404 : 400, e.code === 'ENOENT' ? `File not found: ${file}` : `Not a project file (no valid JSON): ${file}`);
+        }
+        baseDir = path.dirname(file);
+        if (data && typeof data === 'object') data.name ||= path.basename(file).replace(/(\.ovc)?\.json$/i, '');
+      }
+      // A file that is already registered keeps its id, so the UI never holds the same media twice.
+      return resolveProject(data, { baseDir, open: (file) => byPath(file) || register(file) });
     }],
     ['GET', /^\/api\/sources$/, () => [...sources.values()]],
     ['GET', /^\/api\/sources\/([\w-]+)$/, (req, res, url, id) => source(id)],
@@ -183,6 +231,7 @@ export function createServer({ ffmpeg, ffprobe, capabilities, tmpDir, publicDir 
       const j = jobs.create(p, getSource, body);
       return { jobId: j.id };
     }],
+    ['GET', /^\/api\/jobs$/, () => jobs.list()],
     ['GET', /^\/api\/jobs\/([\w-]+)$/, (req, res, url, id) => job(id)],
     ['GET', /^\/api\/jobs\/([\w-]+)\/events$/, (req, res, url, id) => {
       let current = job(id);

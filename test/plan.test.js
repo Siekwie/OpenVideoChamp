@@ -1,9 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { planExport, buildArgs, buildFilterGraph, normalizeRequest, resolveSequence, PlanError, ALL_TRANSITIONS } from '../src/plan.js';
+import path from 'node:path';
+import { planExport, buildArgs, buildFilterGraph, normalizeRequest, resolveSequence, timeline, PlanError, ALL_TRANSITIONS } from '../src/plan.js';
+
+// Absolute paths in the platform's own form: "/videos/x" on POSIX, "C:\videos\x" on Windows.
+const P = (p) => path.resolve(p);
 
 const src = (over = {}) => ({
-  id: 's_1', name: 'clip.mp4', path: '/videos/clip.mp4', uploaded: false, size: 50e6, kind: 'video',
+  id: 's_1', name: 'clip.mp4', path: P('/videos/clip.mp4'), uploaded: false, size: 50e6, kind: 'video',
   duration: 30, width: 1920, height: 1080, fps: 60,
   videoCodec: 'h264', audioCodec: 'aac', hasAudio: true, bitrate: 12000,
   container: 'mov,mp4,m4a,3gp,3g2,mj2', ...over,
@@ -12,7 +16,7 @@ const req = (over = {}) => ({
   sourceId: 's_1', start: 0, end: 30, preset: 'discord', cut: 'fast', resolution: 'auto',
   fps: 'auto', audio: 'keep', speed: 'balanced', encoder: 'auto', outputPath: null, ...over,
 });
-const opts = { encoders: ['libx264', 'h264_nvenc'], defaultOutputDir: '/out', exists: () => false };
+const opts = { encoders: ['libx264', 'h264_nvenc'], defaultOutputDir: P('/out'), exists: () => false };
 const bpp = (p) => (p.videoKbps * 1000) / (p.width * p.height * p.fps);
 const has = (args, ...flags) => flags.every((f) => args.includes(f));
 const flagValue = (args, flag) => args[args.indexOf(flag) + 1];
@@ -23,10 +27,10 @@ const allValues = (args, flag) => args.map((a, i) => (a === flag ? args[i + 1] :
 // A small media library for sequence tests.
 const LIB = {
   s_1: src(),
-  s_b: src({ id: 's_b', name: 'b.mkv', path: '/videos/b.mkv', duration: 20, width: 1280, height: 720, fps: 30, hasAudio: false, audioCodec: null, bitrate: 4000 }),
-  s_img: src({ id: 's_img', name: 'card.png', path: '/videos/card.png', kind: 'image', duration: 0, width: 1920, height: 1080, fps: 0, videoCodec: 'png', hasAudio: false, audioCodec: null, bitrate: 0 }),
-  s_mus: src({ id: 's_mus', name: 'song.mp3', path: '/music/song.mp3', kind: 'audio', duration: 180, width: 0, height: 0, fps: 0, videoCodec: null, audioCodec: 'mp3', hasAudio: true, bitrate: 320 }),
-  s_tall: src({ id: 's_tall', name: 'phone.mp4', path: '/videos/phone.mp4', duration: 10, width: 1080, height: 1920, fps: 30, bitrate: 8000 }),
+  s_b: src({ id: 's_b', name: 'b.mkv', path: P('/videos/b.mkv'), duration: 20, width: 1280, height: 720, fps: 30, hasAudio: false, audioCodec: null, bitrate: 4000 }),
+  s_img: src({ id: 's_img', name: 'card.png', path: P('/videos/card.png'), kind: 'image', duration: 0, width: 1920, height: 1080, fps: 0, videoCodec: 'png', hasAudio: false, audioCodec: null, bitrate: 0 }),
+  s_mus: src({ id: 's_mus', name: 'song.mp3', path: P('/music/song.mp3'), kind: 'audio', duration: 180, width: 0, height: 0, fps: 0, videoCodec: null, audioCodec: 'mp3', hasAudio: true, bitrate: 320 }),
+  s_tall: src({ id: 's_tall', name: 'phone.mp4', path: P('/videos/phone.mp4'), duration: 10, width: 1080, height: 1920, fps: 30, bitrate: 8000 }),
 };
 const lib = (id) => LIB[id] ?? null;
 const seqReq = (over = {}) => ({
@@ -48,17 +52,17 @@ test('discord 10 MB on 30 s 1080p60: 720p or lower by the bpp rule, two-pass, un
   assert.equal(p.audioKbps, 128);
   assert.equal(p.videoKbps, Math.floor((10e6 * 0.96 * 8) / 30 / 1000) - 128);
   assert.ok(p.estimatedBytes <= 10_000_000);
-  assert.equal(p.outputPath, '/videos/clip_10MB.mp4');
+  assert.equal(p.outputPath, P('/videos/clip_10MB.mp4'));
   assert.equal(p.clips, 1);
   assert.equal(p.duration, 30);
   assert.match(p.summary, /2-pass/);
 
-  const passes = buildArgs(p, src(), req(), { passLogFile: '/tmp/pl', nullDevice: '/dev/null' });
+  const passes = buildArgs(p, src(), req(), { passLogFile: 'pl', nullDevice: '/dev/null' });
   assert.equal(passes.length, 2);
   assert.ok(has(passes[0], '-pass', '-an', '-f') && passes[0].at(-1) === '/dev/null');
   assert.equal(flagValue(passes[0], '-pass'), '1');
   assert.equal(flagValue(passes[1], '-pass'), '2');
-  assert.equal(passes[1].at(-1), '/videos/clip_10MB.mp4');
+  assert.equal(passes[1].at(-1), P('/videos/clip_10MB.mp4'));
   assert.equal(flagValue(passes[1], '-b:v'), `${p.videoKbps}k`);
   assert.equal(flagValue(passes[1], '-maxrate'), `${Math.round(p.videoKbps * 1.5)}k`);
   assert.equal(flagValue(passes[1], '-bufsize'), `${p.videoKbps * 3}k`);
@@ -70,8 +74,8 @@ test('discord 10 MB on 30 s 1080p60: 720p or lower by the bpp rule, two-pass, un
   assert.equal(flagValue(passes[1], '-ss'), '0');
   assert.equal(flagValue(passes[1], '-t'), '30');
   const g = graphOf(passes[1]);
-  assert.match(g, new RegExp(`\\[0:v\\]setpts=PTS-STARTPTS,fps=60,scale=${p.width}:${p.height}:flags=bicubic,setsar=1,format=yuv420p,tpad=stop=-1,trim=duration=30\\[v0\\]`));
-  assert.match(g, /\[0:a\]asetpts=PTS-STARTPTS,aresample=48000:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo,apad=whole_dur=30,atrim=duration=30,afade=t=in:d=0.005,afade=t=out:st=29.995:d=0.005\[a0\]/);
+  assert.match(g, new RegExp(`\\[0:v\\]setpts=PTS-STARTPTS,fps=60,scale=${p.width}:${p.height}:flags=bicubic,setsar=1,format=yuv420p,tpad=stop=-1:stop_mode=clone,trim=end_frame=1800,settb=AVTB\\[v0\\]`));
+  assert.match(g, /\[0:a\]asetpts=PTS-STARTPTS,aresample=48000:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo,apad=whole_len=1440000,atrim=end_sample=1440000,afade=t=in:d=0.005,afade=t=out:st=29.995:d=0.005\[a0\]/);
   assert.ok(!g.includes('xfade') && !g.includes('concat') && !g.includes('volume='));
   assert.deepEqual(allValues(passes[1], '-map'), ['[v0]', '[a0]']);
   // pass 1 has no audio graph at all
@@ -103,7 +107,7 @@ test('cut + fast is stream copy with keyframe snap warning', () => {
   assert.equal(p.crf, null);
   assert.equal(p.width, 1920);
   assert.equal(p.targetBytes, null);
-  assert.equal(p.outputPath, '/videos/clip_cut.mp4');
+  assert.equal(p.outputPath, P('/videos/clip_cut.mp4'));
   assert.equal(p.estimatedBytes, 12000 * 125 * 10); // from the keyframe at 10 s
   assert.equal(p.warnings.length, 1);
   assert.match(p.warnings[0], /2\.5 s earlier/);
@@ -119,11 +123,11 @@ test('cut + fast is stream copy with keyframe snap warning', () => {
 
 test('copy mode uses mkv when the source codecs cannot go in mp4', () => {
   const p = planExport(src({ videoCodec: 'vp9', audioCodec: 'vorbis', container: 'matroska,webm' }), req({ preset: 'cut' }), opts);
-  assert.equal(p.outputPath, '/videos/clip_cut.mkv');
+  assert.equal(p.outputPath, P('/videos/clip_cut.mkv'));
   assert.ok(!buildArgs(p, src(), req({ preset: 'cut' }))[0].includes('-movflags'));
   // audio-only problem goes away when muted
   const muted = planExport(src({ audioCodec: 'vorbis' }), req({ preset: 'cut', audio: 'mute' }), opts);
-  assert.equal(muted.outputPath, '/videos/clip_cut.mp4');
+  assert.equal(muted.outputPath, P('/videos/clip_cut.mp4'));
 });
 
 test('cut + precise re-encodes at crf 20', () => {
@@ -132,7 +136,7 @@ test('cut + precise re-encodes at crf 20', () => {
   assert.equal(p.mode, 'encode');
   assert.equal(p.crf, 20);
   assert.equal(p.videoKbps, null);
-  assert.equal(p.outputPath, '/videos/clip_cut.mp4');
+  assert.equal(p.outputPath, P('/videos/clip_cut.mp4'));
   const [args] = buildArgs(p, src(), r);
   assert.equal(flagValue(args, '-crf'), '20');
   assert.ok(!args.includes('-pass'));
@@ -150,7 +154,7 @@ test('steam: crf 18, 1080p cap, 60 fps cap, 192k audio', () => {
   assert.equal(p.fps, 60);
   assert.equal(p.audioKbps, 192);
   assert.equal(p.targetBytes, null);
-  assert.equal(p.outputPath, '/videos/clip_steam.mp4');
+  assert.equal(p.outputPath, P('/videos/clip_steam.mp4'));
   const [args] = buildArgs(p, big, r);
   assert.equal(flagValue(args, '-crf'), '18');
   assert.equal(flagValue(args, '-b:a'), '192k');
@@ -167,27 +171,30 @@ test('custom targetMB', () => {
   const p = planExport(src(), req({ preset: 'custom', targetMB: 2.5 }), opts);
   assert.equal(p.targetBytes, 2_500_000);
   assert.ok(p.estimatedBytes <= 2_500_000);
-  assert.equal(p.outputPath, '/videos/clip_2.5MB.mp4');
+  assert.equal(p.outputPath, P('/videos/clip_2.5MB.mp4'));
   assert.throws(() => planExport(src(), req({ preset: 'custom' }), opts), /targetMB/);
 });
 
 test('explicit outputPath never overwrites and may not be the source', () => {
-  const taken = new Set(['/videos/final.mp4']);
-  const p = planExport(src(), req({ outputPath: '/videos/final.mp4' }), { ...opts, exists: (f) => taken.has(f) });
-  assert.equal(p.outputPath, '/videos/final-2.mp4');
-  assert.throws(() => planExport(src(), req({ outputPath: '/videos/clip.mp4' }), opts), PlanError);
+  const taken = new Set([P('/videos/final.mp4')]);
+  const p = planExport(src(), req({ outputPath: P('/videos/final.mp4') }), { ...opts, exists: (f) => taken.has(f) });
+  assert.equal(p.outputPath, P('/videos/final-2.mp4'));
+  assert.throws(() => planExport(src(), req({ outputPath: P('/videos/clip.mp4') }), opts), PlanError);
   assert.throws(() => planExport(src(), req({ resolution: 1 }), opts), PlanError);
   assert.throws(() => planExport(src(), req({ fps: 0.001 }), opts), PlanError);
 });
 
 test('non-clobber naming, upload directory and explicit outputPath', () => {
-  const taken = new Set(['/videos/clip_10MB.mp4', '/videos/clip_10MB-2.mp4']);
+  const taken = new Set([P('/videos/clip_10MB.mp4'), P('/videos/clip_10MB-2.mp4')]);
   const p = planExport(src(), req(), { ...opts, exists: (f) => taken.has(f) });
-  assert.equal(p.outputPath, '/videos/clip_10MB-3.mp4');
-  const up = planExport(src({ uploaded: true, path: '/tmp/x/clip.mp4' }), req(), opts);
-  assert.equal(up.outputPath, '/out/clip_10MB.mp4');
-  const explicit = planExport(src(), req({ outputPath: '/elsewhere/final.mp4' }), opts);
-  assert.equal(explicit.outputPath, '/elsewhere/final.mp4');
+  assert.equal(p.outputPath, P('/videos/clip_10MB-3.mp4'));
+  const up = planExport(src({ uploaded: true, path: P('/tmp/x/clip.mp4') }), req(), opts);
+  assert.equal(up.outputPath, P('/out/clip_10MB.mp4'));
+  // a file the app keeps under its own output dir (a title card) does not get exports written next to it
+  const card = planExport(src({ name: 'intro.png', path: P('/out/title-cards/intro.png') }), req(), opts);
+  assert.equal(card.outputPath, P('/out/intro_10MB.mp4'));
+  const explicit = planExport(src(), req({ outputPath: P('/elsewhere/final.mp4') }), opts);
+  assert.equal(explicit.outputPath, P('/elsewhere/final.mp4'));
 });
 
 test('fps auto drops to 30 only when bpp is still < 0.05 at the chosen resolution', () => {
@@ -291,17 +298,17 @@ test('two clips with a 1 s crossfade: total 8 s, reference is the sharpest sourc
   assert.equal(p.fps, 60);
   assert.equal(p.crf, 20);
   assert.equal(p.audioKbps, 160); // clip 1 has audio
-  assert.equal(p.outputPath, '/videos/clip_edit_cut.mp4');
+  assert.equal(p.outputPath, P('/videos/clip_edit_cut.mp4'));
   assert.ok(p.warnings.some((w) => /conformed to 60 fps/.test(w)) === false, 'no fps warning when nothing is slowed down');
   const [args] = buildArgs(p, lib, r);
   assert.deepEqual(allValues(args, '-ss'), ['5', '0']);
-  assert.deepEqual(allValues(args, '-i'), ['/videos/clip.mp4', '/videos/b.mkv']);
+  assert.deepEqual(allValues(args, '-i'), [P('/videos/clip.mp4'), P('/videos/b.mkv')]);
   assert.deepEqual(allValues(args, '-t'), ['5', '4', '8']); // two input -t and the output -t
   const g = graphOf(args);
-  assert.match(g, /\[1:v\]setpts=PTS-STARTPTS,fps=60,scale=1920:1080:flags=bicubic,setsar=1,format=yuv420p,tpad=stop=-1,trim=duration=4\[v1\]/);
-  assert.match(g, /anullsrc=r=48000:cl=stereo,atrim=duration=4\[a1\]/); // silent clip gets silence
+  assert.match(g, /\[1:v\]setpts=PTS-STARTPTS,fps=60,scale=1920:1080:flags=bicubic,setsar=1,format=yuv420p,tpad=stop=-1:stop_mode=clone,trim=end_frame=240,settb=AVTB\[v1\]/);
+  assert.match(g, /anullsrc=r=48000:cl=stereo,atrim=end_sample=192000\[a1\]/); // silent clip gets silence
   assert.match(g, /\[v0\]\[v1\]xfade=transition=fade:duration=1:offset=4\[x1\]/);
-  assert.match(g, /\[a0\]\[a1\]acrossfade=d=1:c1=tri:c2=tri\[y1\]/);
+  assert.match(g, /\[a0\]\[a1\]acrossfade=ns=48000:c1=tri:c2=tri\[y1\]/);
   assert.deepEqual(allValues(args, '-map'), ['[x1]', '[y1]']);
 });
 
@@ -320,6 +327,38 @@ test('cuts concat, fades wrap the ends, chained offsets account for earlier tran
   assert.match(g, /\[x1\]\[v2\]xfade=transition=wipeleft:duration=0.5:offset=5.5\[x2\]/);
   assert.match(g, /\[x2\]fade=t=in:d=0.5,fade=t=out:st=7.5:d=1\[vout\]/);
   assert.match(g, /\[y2\]afade=t=in:d=0.5,afade=t=out:st=7.5:d=1\[aout\]/);
+  // xfade refuses inputs on different timebases and concat changes its output's, so a transition after
+  // a cut only works because every clip is put on the same timebase
+  assert.equal(g.match(/,settb=AVTB\[v\d\]/g).length, 3);
+});
+
+test('timeline: clips and transitions are whole frames, audio is cut to the same lengths', () => {
+  // 0.517 s at 30 fps is 15.51 frames: video can only be 16 frames, so the audio must be 16 frames long too
+  const clips = Array.from({ length: 4 }, (_, i) => ({ sourceId: 's_b', start: i, end: i + 0.517 }));
+  const one = { sourceId: 's_tall', start: 0, end: 0.517 };
+  const r = seqReq({ clips: [...clips, one], transitions: ['cut', 'cut', { type: 'fade', duration: 0.21 }, 'cut'], fadeOut: 0.5 });
+  const p = planExport(lib, r, opts);
+  assert.equal(p.fps, 30);
+  assert.equal(p.duration, 2.467); // (5 * 16 - 6) / 30, not the nominal 5 * 0.517 - 0.21 = 2.375
+  const seq = resolveSequence(normalizeRequest(r), lib);
+  assert.deepEqual(timeline(seq, 30), { frames: [16, 16, 16, 16, 16], overlap: [0, 0, 6, 0], total: 74, duration: 74 / 30 });
+  const [args] = buildArgs(p, lib, r);
+  const g = graphOf(args);
+  assert.equal(g.match(/trim=end_frame=16,/g).length, 5);
+  assert.match(g, /\[4:a\][^;]*apad=whole_len=25600,atrim=end_sample=25600,afade=t=in:d=0.005,afade=t=out:st=0.528333:d=0.005\[a4\]/);
+  assert.equal(g.match(/anullsrc=r=48000:cl=stereo,atrim=end_sample=25600/g).length, 4);
+  assert.match(g, /\[x2\]\[v3\]xfade=transition=fade:duration=0.2:offset=1.4\[x3\]/); // 6 frames, starting at frame 48 - 6
+  assert.match(g, /acrossfade=ns=9600:/);
+  assert.match(g, /fade=t=out:st=1.966667:d=0.5\[vout\]/);
+  assert.equal(allValues(args, '-t').at(-1), '2.466667');
+  // two transitions that fill a clip exactly are trimmed by a frame when rounding pushes them past it
+  const tight = resolveSequence(normalizeRequest(seqReq({
+    clips: [{ sourceId: 's_b', start: 0, end: 2 }, { sourceId: 's_b', start: 0, end: 0.5 }, { sourceId: 's_b', start: 0, end: 2 }],
+    transitions: [{ type: 'fade', duration: 0.25 }, { type: 'fade', duration: 0.25 }],
+  })), lib);
+  const tl = timeline(tight, 30);
+  assert.deepEqual(tl.frames, [60, 15, 60]);
+  assert.ok(tl.overlap[0] + tl.overlap[1] <= 15, JSON.stringify(tl.overlap));
 });
 
 test('per-clip volume and mute, image clips, mixed aspect ratios are letterboxed', () => {
@@ -333,12 +372,12 @@ test('per-clip volume and mute, image clips, mixed aspect ratios are letterboxed
   assert.equal(p.height, 1080);
   const [args] = buildArgs(p, lib, r);
   // image input: looped at the output fps for its duration, no -ss
-  const i = args.indexOf('/videos/card.png');
+  const i = args.indexOf(P('/videos/card.png'));
   assert.deepEqual(args.slice(i - 7, i), ['-loop', '1', '-framerate', '60', '-t', '3', '-i']);
   const g = graphOf(args);
-  assert.match(g, /\[0:a\]asetpts=PTS-STARTPTS,aresample=48000:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=0.25,apad=whole_dur=2/);
-  assert.match(g, /anullsrc=r=48000:cl=stereo,atrim=duration=3\[a1\]/);
-  assert.match(g, /anullsrc=r=48000:cl=stereo,atrim=duration=2\[a2\]/); // muted clip
+  assert.match(g, /\[0:a\]asetpts=PTS-STARTPTS,aresample=48000:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=0.25,apad=whole_len=96000,/);
+  assert.match(g, /anullsrc=r=48000:cl=stereo,atrim=end_sample=144000\[a1\]/);
+  assert.match(g, /anullsrc=r=48000:cl=stereo,atrim=end_sample=96000\[a2\]/); // muted clip
   assert.match(g, /\[2:v\]setpts=PTS-STARTPTS,fps=60,scale=1920:1080:force_original_aspect_ratio=decrease:flags=bicubic,pad=1920:1080:\(ow-iw\)\/2:\(oh-ih\)\/2,setsar=1/);
   // all-muted sequence has no audio at all
   const silent = planExport(lib, seqReq({ clips: [{ sourceId: 's_b', end: 2 }, { sourceId: 's_img', end: 2 }], transitions: ['cut'] }), opts);
@@ -352,7 +391,7 @@ test('image-only sequence: 30 fps, no bitrate cap, reference is the image', () =
   assert.equal(p.fps, 30);
   assert.equal(p.height, 1080);
   assert.equal(p.audioKbps, 0);
-  assert.equal(p.outputPath, '/videos/card_10MB.mp4');
+  assert.equal(p.outputPath, P('/videos/card_10MB.mp4'));
   assert.equal(p.mode, 'encode');
 });
 
@@ -361,10 +400,10 @@ test('music: mixed under the clips with its own fades, looped, seeked, or replac
   const p = planExport(lib, r, opts);
   assert.equal(p.music, true);
   const [args] = buildArgs(p, lib, r);
-  const m = args.indexOf('/music/song.mp3');
+  const m = args.indexOf(P('/music/song.mp3'));
   assert.deepEqual(args.slice(m - 5, m), ['-stream_loop', '-1', '-ss', '12', '-i']);
   const g = graphOf(args);
-  assert.match(g, /\[2:a\]asetpts=PTS-STARTPTS,aresample=48000:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=0.4,afade=t=in:d=1,afade=t=out:st=6:d=2,apad=whole_dur=8,atrim=duration=8\[m\]/);
+  assert.match(g, /\[2:a\]asetpts=PTS-STARTPTS,aresample=48000:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=0.4,afade=t=in:d=1,afade=t=out:st=6:d=2,apad=whole_len=384000,atrim=end_sample=384000\[m\]/);
   assert.match(g, /\[y1\]\[m\]amix=inputs=2:duration=first:dropout_transition=0:normalize=0\[mix\]/);
   assert.deepEqual(allValues(args, '-map'), ['[x1]', '[mix]']);
 
@@ -382,7 +421,7 @@ test('music: mixed under the clips with its own fades, looped, seeked, or replac
   const silentClips = { clips: [{ sourceId: 's_b', end: 2 }], transitions: [] };
   assert.equal(planExport(lib, seqReq({ ...silentClips, music: { sourceId: 's_mus' } }), opts).audioKbps, 160);
   const muted = seqReq({ ...silentClips, music: { sourceId: 's_mus' }, audio: 'mute' });
-  assert.ok(!buildArgs(planExport(lib, muted, opts), lib, muted)[0].includes('/music/song.mp3'));
+  assert.ok(!buildArgs(planExport(lib, muted, opts), lib, muted)[0].includes(P('/music/song.mp3')));
   // a video file can be the music too
   assert.equal(planExport(lib, seqReq({ music: { sourceId: 's_1' } }), opts).music, true);
 });
@@ -393,8 +432,8 @@ test('normalize adds loudnorm and resamples back to 48 kHz; two-pass pass 1 skip
   assert.equal(p.twoPass, true);
   const passes = buildArgs(p, lib, r, { passLogFile: '/tmp/pl', nullDevice: '/dev/null' });
   assert.match(graphOf(passes[1]), /\[mix\]loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000\[aout\]/);
-  assert.ok(!passes[0].includes('/music/song.mp3') && !graphOf(passes[0]).includes('[m]'));
-  assert.ok(passes[1].includes('/music/song.mp3'));
+  assert.ok(!passes[0].includes(P('/music/song.mp3')) && !graphOf(passes[0]).includes('[m]'));
+  assert.ok(passes[1].includes(P('/music/song.mp3')));
   assert.equal(allValues(passes[1], '-i').length, 3);
 });
 
@@ -422,6 +461,9 @@ test('copy mode is only for a single untouched video clip', () => {
   assert.equal(copy({}), 'copy');
   assert.equal(copy({ clips: [{ sourceId: 's_1', start: 0, end: 5, mute: true }] }), 'copy'); // -an is fine in copy mode
   assert.equal(copy({ clips: [{ sourceId: 's_1', start: 0, end: 5, volume: 0.5 }] }), 'encode');
+  // the single-range shape takes volume and mute too
+  assert.equal(planExport(lib, { sourceId: 's_1', start: 0, end: 5, volume: 0.5 }, opts).mode, 'encode');
+  assert.equal(planExport(lib, { sourceId: 's_1', start: 0, end: 5, mute: true }, opts).audioKbps, 0);
   assert.equal(copy({ fadeIn: 1 }), 'encode');
   assert.equal(copy({ music: { sourceId: 's_mus' } }), 'encode');
   assert.equal(copy({ normalize: true }), 'encode');
@@ -432,7 +474,7 @@ test('copy mode is only for a single untouched video clip', () => {
 
 test('preview: draft 480p CRF 28 ultrafast, written to the preview dir, no size target', () => {
   const r = seqReq({ preview: true, preset: 'discord', fadeOut: 1 });
-  const p = planExport(lib, r, { ...opts, previewDir: '/tmp/previews' });
+  const p = planExport(lib, r, { ...opts, previewDir: P('/tmp/previews') });
   assert.equal(p.preview, true);
   assert.equal(p.targetBytes, null);
   assert.equal(p.crf, 28);
@@ -440,7 +482,8 @@ test('preview: draft 480p CRF 28 ultrafast, written to the preview dir, no size 
   assert.equal(p.height, 480);
   assert.equal(p.width, 854);
   assert.equal(p.audioKbps, 96);
-  assert.match(p.outputPath, /^\/tmp\/previews\/preview-[a-z0-9]+\.mp4$/);
+  assert.equal(path.dirname(p.outputPath), P('/tmp/previews'));
+  assert.match(path.basename(p.outputPath), /^preview-[a-z0-9]+\.mp4$/);
   assert.match(p.summary, /^Draft preview/);
   const [args] = buildArgs(p, lib, r);
   assert.equal(flagValue(args, '-preset'), 'ultrafast');
