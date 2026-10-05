@@ -6,23 +6,32 @@ export const DEFAULT_TRANSITION = 0.5;
 export const DEFAULT_MUSIC = { start: 0, volume: 0.5, fadeIn: 1, fadeOut: 2, loop: true, mode: 'mix' };
 export const MAX_FADE = 30;
 export const OUTPUT_VALUES = {
-  preset: ['cut', 'discord', 'discord50', 'discord500', 'steam', 'custom'],
+  preset: ['cut', 'discord', 'discord50', 'discord500', 'steam', 'tiktok', 'custom'],
   cut: ['fast', 'precise'],
   resolution: ['auto', 'source', '1080', '720', '480', '360'],
   fps: ['auto', 'source', '60', '30'],
   audio: ['keep', 'mute'],
   speed: ['fast', 'balanced', 'best'],
 };
+// Canvas shapes (width / height); "auto" follows the clips, and the tiktok preset makes it 9:16.
+export const ASPECTS = { auto: null, '16:9': 16 / 9, '9:16': 9 / 16, '1:1': 1, '4:5': 4 / 5 };
+export const FITS = ['fit', 'fill', 'blur'];
+// What a clip has on top of its range; a new clip starts with these.
+export const CLIP_DEFAULTS = { volume: 1, mute: false, rate: 1, fit: null, zoom: 1, pan: [], look: null, keepColor: null, hit: null, flash: 0, sounds: [] };
 
 export const state = {
   info: null,
   sources: new Map(),          // id -> Source (+ thumbs: [canvas|null], thumbTimes: [s])
-  clips: [],                   // { id, sourceId, start, end, volume, mute }
+  clips: [],                   // { id, sourceId, start, end, ...CLIP_DEFAULTS }
   transitions: [],             // { type, duration }  (clips.length - 1 entries)
   fadeIn: 0,
   fadeOut: 0,
   music: null,                 // { sourceId, start, volume, fadeIn, fadeOut, loop, mode }
   normalize: false,
+  aspect: 'auto',              // canvas shape, see ASPECTS
+  fit: 'fit',                  // how clips fill the canvas unless they say otherwise: fit | fill | blur
+  look: null,                  // colour grade of the whole video
+  beats: null,                 // { sourceId, bpm, beats, downbeats } of the music track, once analysed
   output: { preset: 'steam', targetMB: 10, cut: 'fast', resolution: 'auto', fps: 'auto', audio: 'keep', speed: 'balanced', encoder: 'auto' },
   projectName: null,           // set by an opened project; otherwise the first clip's name is used
   revision: 0,                 // counts edits, so a finished preview render knows whether it is already out of date
@@ -48,7 +57,7 @@ export function emit(event, payload) {
 
 // ---------- history (undo / redo) ----------
 
-const SNAPSHOT_KEYS = ['clips', 'transitions', 'fadeIn', 'fadeOut', 'music', 'normalize'];
+const SNAPSHOT_KEYS = ['clips', 'transitions', 'fadeIn', 'fadeOut', 'music', 'normalize', 'aspect', 'fit', 'look'];
 const undoStack = [], redoStack = [];
 const snapshot = () => JSON.stringify(Object.fromEntries(SNAPSHOT_KEYS.map((k) => [k, state[k]])));
 function restore(snap) {
@@ -90,8 +99,54 @@ let nextId = 1;
 export const newId = () => `c${Date.now().toString(36)}${(nextId++).toString(36)}`;
 export const source = (id) => state.sources.get(id) || null;
 export const clipSource = (clip) => (clip ? source(clip.sourceId) : null);
-export const clipLength = (clip) => (clip ? Math.max(0, clip.end - clip.start) : 0);
 export const isImage = (clip) => clipSource(clip)?.kind === 'image';
+// Seconds of source a clip uses, and seconds it lasts in the video (its playback rate applied).
+export const clipSpan = (clip) => (clip ? Math.max(0, clip.end - clip.start) : 0);
+export const clipRate = (clip) => (clip && !isImage(clip) ? clip.rate || 1 : 1);
+export const clipLength = (clip) => clipSpan(clip) / clipRate(clip);
+
+// The canvas shape as width / height, or null while it follows the clips (then the plan knows it).
+export function canvasRatio() {
+  const r = ASPECTS[state.aspect] ?? (state.output.preset === 'tiktok' ? ASPECTS['9:16'] : null);
+  if (r) return r;
+  return state.plan?.width && state.plan?.height ? state.plan.width / state.plan.height : null;
+}
+
+// The part of the source a clip shows (like the planner's framing): for "fill" the canvas shape, else the
+// source shape, shrunk by the zoom. `room` is how far it can move. Null until the canvas shape is known.
+export function cropRegion(c) {
+  const src = clipSource(c), ratio = canvasRatio();
+  if (!src?.width || !src?.height || !ratio) return null;
+  const r = (c.fit || state.fit) === 'fill' ? ratio : src.width / src.height;
+  let w = src.width, hgt = src.height;
+  if (src.width / src.height > r) w = src.height * r; else hgt = src.width / r;
+  w = Math.min(src.width, w / c.zoom);
+  hgt = Math.min(src.height, hgt / c.zoom);
+  return { w, h: hgt, roomX: src.width - w, roomY: src.height - hgt, sw: src.width, sh: src.height, full: w >= src.width - 2 && hgt >= src.height - 2 };
+}
+
+// Sets the crop position at source time t: a keyframe when the clip is animated (two or more), else the
+// one fixed position.
+export function setPanAt(c, t, x, y) {
+  x = clamp(x, 0, 1); y = clamp(y, 0, 1);
+  if (c.pan.length >= 2) {
+    const k = c.pan.find((p) => Math.abs(p.t - t) < 0.02);
+    if (k) Object.assign(k, { x, y });
+    else { c.pan.push({ t: round3(t), x, y }); c.pan.sort((a, b) => a.t - b.t); }
+  } else c.pan = Math.abs(x - 0.5) < 1e-3 && Math.abs(y - 0.5) < 1e-3 ? [] : [{ t: round3(c.start), x, y }];
+}
+
+// Where the crop window of a clip sits at source time t: pan keyframes interpolated, centred without any.
+export function panAt(clip, t) {
+  const keys = clip?.pan || [];
+  if (!keys.length) return { x: 0.5, y: 0.5 };
+  if (keys.length === 1 || t <= keys[0].t) return { x: keys[0].x, y: keys[0].y };
+  const last = keys.at(-1);
+  if (t >= last.t) return { x: last.x, y: last.y };
+  const i = keys.findIndex((k) => k.t > t);
+  const a = keys[i - 1], b = keys[i], u = (t - a.t) / Math.max(1e-6, b.t - a.t);
+  return { x: a.x + (b.x - a.x) * u, y: a.y + (b.y - a.y) * u };
+}
 export const selectedClip = () => (state.selection?.kind === 'clip' ? state.clips[state.selection.index] || null : null);
 export const selectedIndex = () => (state.selection?.kind === 'clip' ? state.selection.index : -1);
 
@@ -136,6 +191,7 @@ export function normalizeSequence() {
     });
   }
   if (state.music && !state.sources.has(state.music.sourceId)) state.music = null;
+  if (state.beats && state.beats.sourceId !== state.music?.sourceId) state.beats = null;
   // A pair of fades can never be longer than the video; shrink both in proportion.
   const total = totalDuration();
   for (const fades of [state, state.music]) {
@@ -189,9 +245,17 @@ export function setMonitorMode(mode) {
 
 // ---------- clip operations ----------
 
+// A clip with every field, from whatever subset `c` has (projects, older autosaves, the montage API).
+export function fullClip(c) {
+  const clip = { ...structuredClone(CLIP_DEFAULTS), ...structuredClone(c), id: c.id || newId() };
+  for (const [k, v] of Object.entries(CLIP_DEFAULTS)) {
+    if (Array.isArray(v) ? !Array.isArray(clip[k]) : clip[k] === undefined || (typeof v === 'number' && !Number.isFinite(Number(clip[k])))) clip[k] = structuredClone(v);
+  }
+  return clip;
+}
+
 function makeClip(src, seconds) {
-  if (src.kind === 'image') return { id: newId(), sourceId: src.id, start: 0, end: seconds ?? DEFAULT_IMAGE_SECONDS, volume: 1, mute: false };
-  return { id: newId(), sourceId: src.id, start: 0, end: src.duration, volume: 1, mute: false };
+  return fullClip({ sourceId: src.id, start: 0, end: src.kind === 'image' ? seconds ?? DEFAULT_IMAGE_SECONDS : src.duration });
 }
 
 // Inserts a clip covering the whole source after the selected clip (or at the end); returns its index.
@@ -232,7 +296,7 @@ export function duplicateClip(index) {
   const c = state.clips[index];
   if (!c) return;
   edit(() => {
-    state.clips.splice(index + 1, 0, { ...c, id: newId() });
+    state.clips.splice(index + 1, 0, { ...structuredClone(c), id: newId() });
     state.transitions.splice(index, 0, { type: 'cut', duration: 0 });
   }, { structural: true });
   selectClip(index + 1);
@@ -245,7 +309,20 @@ export function splitClip(index, t) {
   t = round3(t);
   if (t < c.start + MIN_LEN || t > c.end - MIN_LEN) return false;
   edit(() => {
-    const second = { ...c, id: newId(), start: t };
+    // Each half keeps what happens inside it: the hit, its sounds, the pan keyframes (plus the position at the cut).
+    const second = { ...structuredClone(c), id: newId(), start: t };
+    const pos = panAt(c, t);
+    if (c.pan.length > 1) {
+      c.pan = [...c.pan.filter((k) => k.t < t), { t, ...pos }];
+      second.pan = [{ t, ...pos }, ...second.pan.filter((k) => k.t > t)];
+    }
+    // A sound without its own time plays at the hit (or at the start of the clip).
+    const first = (x) => (x.at ?? c.hit ?? c.start) < t;
+    second.sounds = second.sounds.filter((x) => !first(x));
+    c.sounds = c.sounds.filter(first);
+    if (c.hit != null) {
+      if (c.hit < t) { second.hit = null; second.flash = 0; } else { c.hit = null; c.flash = 0; }
+    }
     c.end = t;
     state.clips.splice(index + 1, 0, second);
     state.transitions.splice(index, 0, { type: 'cut', duration: 0 });
@@ -292,7 +369,10 @@ export function setSequenceField(key, value) {
 }
 
 export function clearSequence() {
-  edit(() => { state.clips = []; state.transitions = []; state.music = null; state.fadeIn = 0; state.fadeOut = 0; state.normalize = false; }, { structural: true });
+  edit(() => {
+    state.clips = []; state.transitions = []; state.music = null; state.fadeIn = 0; state.fadeOut = 0; state.normalize = false;
+    state.aspect = 'auto'; state.fit = 'fit'; state.look = null;
+  }, { structural: true });
   select(null);
 }
 
@@ -308,8 +388,10 @@ export function loadOutputOptions() {
 }
 
 export function setOutput(patch) {
-  // The draft preview only depends on one output option: whether there is sound at all.
+  // The draft preview depends on two output options: whether there is sound at all, and (with Format on
+  // Auto) whether the tiktok preset makes the video vertical.
   if (state.preview && 'audio' in patch && patch.audio !== state.output.audio) state.preview.stale = true;
+  if (state.preview && 'preset' in patch && state.aspect === 'auto' && (patch.preset === 'tiktok') !== (state.output.preset === 'tiktok')) state.preview.stale = true;
   Object.assign(state.output, patch);
   try { localStorage.setItem('ovc.output', JSON.stringify(state.output)); } catch { /* ignore */ }
   emit('output');
@@ -321,9 +403,10 @@ export function exportRequest(extra = {}) {
   const o = state.output;
   const num = (v) => (/^\d+$/.test(v) ? Number(v) : v);
   const req = {
-    clips: state.clips.map((c) => ({ sourceId: c.sourceId, start: c.start, end: c.end, volume: c.volume, mute: c.mute })),
+    clips: state.clips.map(clipRequest),
     transitions: state.transitions.map((t) => ({ type: t.type, duration: t.duration })),
     fadeIn: state.fadeIn, fadeOut: state.fadeOut, normalize: state.normalize,
+    aspect: state.aspect, fit: state.fit, look: state.look,
     music: state.music ? { ...state.music } : null,
     preset: o.preset, cut: o.cut, resolution: num(o.resolution), fps: num(o.fps), audio: o.audio, speed: o.speed, encoder: o.encoder,
     ...extra,
@@ -332,10 +415,26 @@ export function exportRequest(extra = {}) {
   return req;
 }
 
+// A clip as the API wants it (no UI ids; empty extras left out).
+export function clipRequest(c) {
+  const r = { sourceId: c.sourceId, start: c.start, end: c.end, volume: c.volume, mute: c.mute };
+  if (c.rate !== 1) r.rate = c.rate;
+  if (c.fit) r.fit = c.fit;
+  if (c.zoom !== 1) r.zoom = c.zoom;
+  if (c.pan.length) r.pan = c.pan;
+  if (c.look) r.look = c.look;
+  if (c.keepColor) r.keepColor = c.keepColor;
+  if (c.hit != null) r.hit = c.hit;
+  if (c.flash && c.hit != null) r.flash = c.flash;
+  if (c.sounds.length) r.sounds = c.sounds;
+  return r;
+}
+
 // Is the sequence a plain single range that could be stream-copied? (controls the fast/precise option)
 export function copyCandidate() {
   const [c] = state.clips;
-  return state.clips.length === 1 && !isImage(c) && c.volume === 1 && !state.music && !state.fadeIn && !state.fadeOut && !state.normalize;
+  return state.clips.length === 1 && !isImage(c) && c.volume === 1 && c.rate === 1 && c.zoom === 1 && !c.look && !c.keepColor && !c.flash && !c.sounds.length
+    && !state.music && !state.fadeIn && !state.fadeOut && !state.normalize && !state.look && state.aspect === 'auto';
 }
 
 export const jobActive = (job) => !!(job && (job.status === 'queued' || job.status === 'running'));

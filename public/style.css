@@ -17,6 +17,8 @@
   --err: #e46d6d;
   --ok: #5fc98c;
   --music: #58c4a8;
+  --hit: #ffc94a;
+  --keyframe: #b48cff;
   --music-soft: rgba(88, 196, 168, 0.2);
   --track: #0a0a0c;
   --radius: 6px;
@@ -245,6 +247,51 @@ select option, select optgroup { background: var(--surface2); color: var(--text)
 .panel p.warn { font-size: 12px; }
 .panel .seg { align-self: flex-start; }
 
+/* collapsible sections of the clip panel */
+.sect { border-top: 1px solid var(--border); margin: 0 -14px; padding: 0 14px; }
+.sect > summary { list-style: none; display: flex; align-items: baseline; justify-content: space-between; gap: 8px; cursor: pointer; padding: 9px 0; user-select: none; }
+.sect > summary::-webkit-details-marker { display: none; }
+.sect > summary::before { content: "▸"; color: var(--faint); font-size: 10px; width: 10px; transition: transform .12s; }
+.sect[open] > summary::before { transform: rotate(90deg); }
+.secttitle { font-weight: 600; flex: 1; }
+.sectsum { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 60%; }
+.sect > summary:hover .secttitle { color: #fff; }
+.sectbody { display: flex; flex-direction: column; gap: 10px; padding: 0 0 12px; }
+.subsect { display: flex; flex-direction: column; }
+.subsect > summary { cursor: pointer; color: var(--muted); font-size: 12px; padding: 2px 0 6px; }
+.subsect[open] { gap: 8px; }
+.subsect[open] > summary { padding-bottom: 2px; }
+.btnstack { display: flex; flex-direction: column; gap: 4px; justify-content: flex-end; }
+.hitrow { align-items: flex-end; }
+.hitrow .field input[type="text"] { width: 100%; }
+.swatches { align-items: center; gap: 6px; }
+.swatch { width: 24px; height: 24px; padding: 0; border-radius: 50%; border: 2px solid var(--surface); box-shadow: 0 0 0 1px var(--border-strong); }
+.swatch:hover { box-shadow: 0 0 0 1px var(--text); }
+.swatch.on { box-shadow: 0 0 0 2px var(--text); }
+.tintrow { align-items: center; }
+.tintrow .slider { flex: 1; }
+.montagebox { display: flex; flex-wrap: wrap; gap: 6px; padding-bottom: 2px; }
+.montagebox button { flex: 1 1 auto; justify-content: center; }
+.panel .seg.small button { padding: 0 8px; }
+
+/* reframing on the monitor: the part that ends up in the video, draggable */
+.cropbox { position: absolute; overflow: hidden; pointer-events: none; }
+.cropframe {
+  position: absolute; box-sizing: border-box; border: 2px solid rgba(255, 255, 255, .9); border-radius: 2px;
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, .55); cursor: grab; pointer-events: auto; touch-action: none;
+}
+.cropframe.fixed { cursor: default; }
+.cropframe.dragging { cursor: grabbing; border-color: var(--accent); }
+.croplabel { position: absolute; left: 6px; top: 6px; font-size: 11px; color: #fff; text-shadow: 0 1px 2px #000; pointer-events: none; }
+
+/* hit, pan keyframes and colour return on the trim track */
+.trackmarks { position: absolute; inset: 0; pointer-events: none; z-index: 2; }
+.mark { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; }
+.mark.hit { background: var(--hit); box-shadow: 0 0 3px rgba(0, 0, 0, .8); }
+.mark.hit span { position: absolute; top: 2px; left: 4px; font-size: 10px; font-weight: 600; color: var(--hit); text-shadow: 0 1px 2px #000; white-space: nowrap; }
+.mark.key { top: auto; bottom: 3px; width: 8px; height: 8px; margin-left: -4px; background: var(--keyframe); transform: rotate(45deg); border-radius: 1px; }
+.mark.colour { background: linear-gradient(#e0501e, #2a6cf0, #2ec850); opacity: .9; }
+
 /* ---- sequence strip ---- */
 .sequence { display: flex; flex-direction: column; gap: 6px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px 10px; }
 .seqhead { display: flex; align-items: center; gap: 10px; height: 26px; }
@@ -273,6 +320,10 @@ select option, select optgroup { background: var(--surface2); color: var(--text)
 .clipname { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #fff; }
 .cliplen { color: #cfcfd6; flex: none; }
 .clipbadges { position: absolute; top: 5px; left: 6px; display: flex; gap: 4px; pointer-events: none; }
+.cliphit { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--hit); box-shadow: 0 0 3px rgba(0, 0, 0, .9); pointer-events: none; }
+.beatlayer { position: absolute; left: 0; bottom: 2px; height: 0; width: 0; pointer-events: none; z-index: 3; }
+.beatlayer i { position: absolute; bottom: 0; width: 1px; height: 6px; background: rgba(88, 196, 168, .8); }
+.beatlayer i.bar { height: 11px; width: 2px; background: var(--music); }
 .badge { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; padding: 1px 5px; border-radius: 3px; background: rgba(10, 10, 12, .75); color: var(--muted); }
 .tr {
   flex: none; width: 22px; height: 80px; padding: 0; border: 0; border-radius: 0; background: transparent;
@@ -352,6 +403,11 @@ select option, select optgroup { background: var(--surface2); color: var(--text)
 .modalactions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding-top: 4px; }
 .cardlayout { display: grid; grid-template-columns: 1fr 300px; gap: 16px; align-items: start; }
 #cardCanvas { width: 100%; height: auto; border-radius: 6px; border: 1px solid var(--border); background: #000; display: block; }
+#cardCanvas.tall { width: auto; max-width: 100%; max-height: 60vh; margin: 0 auto; }
+.montageform { max-width: 520px; }
+.montageform .unit input { width: 58px; }
+.montagestatus { min-height: 1.4em; color: var(--muted); }
+.montagestatus.err { color: var(--err); }
 .cardfields { display: flex; flex-direction: column; gap: 10px; }
 .cardfields label { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; flex: 1; }
 .cardfields label input[type="text"], .cardfields label select { text-transform: none; letter-spacing: 0; font-size: 13px; color: var(--text); }
@@ -360,6 +416,7 @@ select option, select optgroup { background: var(--surface2); color: var(--text)
 .help { max-width: 860px; }
 .helpcols { display: grid; grid-template-columns: 1.1fr 1fr; gap: 24px; }
 .helpcols h3 { margin-bottom: 8px; }
+.helpcols h3.helpsub { margin-top: 16px; }
 .helpcols ol { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; }
 .helpcols p { margin-top: 12px; font-size: 12px; }
 .keys { border-collapse: collapse; font-size: 12.5px; }

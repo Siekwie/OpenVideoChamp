@@ -1,12 +1,13 @@
 // The monitor (video/image/preview playback + transport) and the trim track of the selected clip.
-import { $, clamp, round3, MIN_LEN, fmtTime, fmtSec, once, sizeCanvas, drawCover } from './util.js';
+import { $, h, clamp, round3, MIN_LEN, fmtTime, fmtSec, once, sizeCanvas, drawCover } from './util.js';
 import { api } from './api.js';
-import { state, on, emit, source, clipSource, selectedClip, selectedIndex, selectClip, isImage, checkpoint, afterEdit, edit, setClipRange, splitClip, copyCandidate, setMonitorMode, totalDuration } from './state.js';
+import { state, on, emit, source, clipSource, selectedClip, selectedIndex, selectClip, isImage, checkpoint, afterEdit, edit, setClipRange, splitClip, copyCandidate, setMonitorMode, totalDuration,
+  cropRegion, panAt, setPanAt, clipRate } from './state.js';
 
 const el = {};
 for (const id of ['dropzone', 'video', 'image', 'thumbVideo', 'monitorBadge', 'monitorNote', 'backToSourceBtn', 'playBtn', 'curTime', 'totTime',
   'transportLabel', 'setIn', 'setOut', 'splitBtn', 'track', 'strip', 'kfCanvas', 'dimL', 'dimR', 'selBody',
-  'snapMark', 'hIn', 'hOut', 'playhead', 'trackNote']) el[id] = $(id);
+  'snapMark', 'hIn', 'hOut', 'playhead', 'trackNote', 'trackMarks', 'cropBox', 'cropFrame', 'cropLabel']) el[id] = $(id);
 const video = el.video;
 
 let loadedUrl = null;      // what the <video> currently has
@@ -88,8 +89,102 @@ export function renderMonitor() {
       else if (changed || t < c.start - 0.001 || t > c.end + 0.001) seek(c.start);
     }
   }
+  const preview = state.monitorMode === 'preview';
+  video.playbackRate = preview || !c ? 1 : clipRate(c);
+  const filter = preview ? '' : cssFilter(c);
+  video.style.filter = el.image.style.filter = filter;
   renderTrack();
   renderTransport();
+  renderCrop();
+}
+
+// ---------- live look and reframing on the source picture ----------
+
+// The clip's look and the whole video's as a CSS filter: close enough to judge a grade while editing
+// (tint, sharpening, motion blur, the flash and selective colour show in the draft preview).
+function cssFilter(c) {
+  const parts = [];
+  for (const look of [c?.look, state.look]) {
+    if (!look) continue;
+    if (look.brightness) parts.push(`brightness(${1 + look.brightness})`);
+    if (look.contrast != null && look.contrast !== 1) parts.push(`contrast(${look.contrast})`);
+    if (look.saturation != null && look.saturation !== 1) parts.push(`saturate(${look.saturation})`);
+    if (look.hue) parts.push(`hue-rotate(${look.hue}deg)`);
+  }
+  return parts.join(' ');
+}
+
+// The playhead as a source time of clip c, or null when the monitor is not showing c's source.
+export function playheadTime(c) {
+  if (!c || state.monitorMode === 'preview' || isImage(c) || shownSourceId !== c.sourceId || video.hidden) return null;
+  return video.currentTime;
+}
+
+// Where the media is drawn inside the monitor (object-fit: contain).
+function mediaRect(src) {
+  const box = (video.hidden ? el.image : video).getBoundingClientRect(), mon = el.cropBox.parentElement.getBoundingClientRect();
+  const scale = Math.min(box.width / src.width, box.height / src.height);
+  const w = src.width * scale, hgt = src.height * scale;
+  return { left: box.left - mon.left + (box.width - w) / 2, top: box.top - mon.top + (box.height - hgt) / 2, width: w, height: hgt, scale };
+}
+
+// The frame that will be in the video: everything outside it is dimmed, and it can be dragged.
+export function renderCrop() {
+  const c = currentClip();
+  const region = c && state.monitorMode !== 'preview' ? cropRegion(c) : null;
+  const show = !!region && !region.full && state.selection?.kind === 'clip';
+  el.cropBox.hidden = !show;
+  if (!show) return;
+  const src = clipSource(c);
+  const r = mediaRect(src);
+  Object.assign(el.cropBox.style, { left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${r.height}px` });
+  const t = isImage(c) ? c.start : clampTime(c, video.currentTime);
+  const pos = cropDrag ? cropDrag.pos : panAt(c, t);
+  Object.assign(el.cropFrame.style, {
+    left: `${(pos.x * region.roomX / src.width) * 100}%`, top: `${(pos.y * region.roomY / src.height) * 100}%`,
+    width: `${(region.w / src.width) * 100}%`, height: `${(region.h / src.height) * 100}%`,
+  });
+  el.cropFrame.classList.toggle('fixed', region.roomX < 1 && region.roomY < 1);
+  const keyed = c.pan.length >= 2 && c.pan.some((k) => Math.abs(k.t - t) < 0.02);
+  el.cropLabel.textContent = c.pan.length >= 2 ? (keyed ? 'keyframe' : 'animated · drag to add a keyframe') : '';
+}
+
+const clampTime = (c, t) => clamp(t, c.start, c.end);
+let cropDrag = null;
+
+function onCropDown(e) {
+  const c = currentClip();
+  const region = c && cropRegion(c);
+  if (e.button !== 0 || !region) return;
+  if (state.selection?.kind !== 'clip') selectClip(monitorIndex());
+  video.pause();
+  const t = isImage(c) ? c.start : clampTime(c, video.currentTime);
+  cropDrag = { c, t, x0: e.clientX, y0: e.clientY, start: panAt(c, t), pos: panAt(c, t), region, scale: mediaRect(clipSource(c)).scale, edited: false };
+  el.cropFrame.setPointerCapture(e.pointerId);
+  el.cropFrame.classList.add('dragging');
+  e.preventDefault();
+  e.stopPropagation();
+}
+
+function onCropMove(e) {
+  const d = cropDrag;
+  if (!d) return;
+  const dx = (e.clientX - d.x0) / d.scale, dy = (e.clientY - d.y0) / d.scale;
+  d.pos = {
+    x: d.region.roomX >= 1 ? clamp(d.start.x + dx / d.region.roomX, 0, 1) : d.start.x,
+    y: d.region.roomY >= 1 ? clamp(d.start.y + dy / d.region.roomY, 0, 1) : d.start.y,
+  };
+  if (!d.edited) { checkpoint(); d.edited = true; }
+  setPanAt(d.c, d.t, d.pos.x, d.pos.y);
+  renderCrop();
+}
+
+function onCropUp() {
+  const d = cropDrag;
+  if (!d) return;
+  cropDrag = null;
+  el.cropFrame.classList.remove('dragging');
+  if (d.edited) afterEdit();
 }
 
 // ---------- transport ----------
@@ -116,6 +211,7 @@ export function renderTime() {
     const dur = src?.duration || 0;
     el.playhead.style.left = `${(dur ? clamp(t, 0, dur) / dur : 0) * 100}%`;
     el.playhead.hidden = !dur;
+    if (currentClip()?.pan.length >= 2) renderCrop(); // an animated frame moves with the playhead
   }
 }
 
@@ -234,9 +330,21 @@ export function renderTrack() {
     el.snapMark.style.setProperty('--snap-w', `${((c.start - kf) / dur) * el.track.clientWidth}px`);
   }
   if (showKeyframes()) ensureKeyframes(src);
+  renderMarks(c, src);
   drawStrip(src);
   drawKeyframes(src);
   renderTime();
+}
+
+// The hit, the pan keyframes and where the colour returns, on the trim track.
+function renderMarks(c, src) {
+  const dur = src.duration || 1;
+  const pct = (t) => `${(clamp(t, 0, dur) / dur) * 100}%`;
+  const marks = [];
+  if (c.hit != null) marks.push(h('div', { class: 'mark hit', style: { left: pct(c.hit) }, title: `Hit ${fmtTime(c.hit)}` }, h('span', { text: c.flash ? 'hit ✦' : 'hit' })));
+  if (c.pan.length >= 2) for (const k of c.pan) marks.push(h('div', { class: 'mark key', style: { left: pct(k.t) }, title: `Frame keyframe ${fmtTime(k.t)}` }));
+  if (c.keepColor?.until != null) marks.push(h('div', { class: 'mark colour', style: { left: pct(c.keepColor.until) }, title: `Colour returns ${fmtTime(c.keepColor.until)}` }));
+  el.trackMarks.replaceChildren(...marks);
 }
 
 function drawStrip(src) {
@@ -403,6 +511,14 @@ export function initMonitor() {
   el.track.addEventListener('pointercancel', onTrackUp);
   new ResizeObserver(() => renderTrack()).observe(el.track);
 
+  el.cropFrame.addEventListener('pointerdown', onCropDown);
+  el.cropFrame.addEventListener('pointermove', onCropMove);
+  el.cropFrame.addEventListener('pointerup', onCropUp);
+  el.cropFrame.addEventListener('pointercancel', onCropUp);
+  new ResizeObserver(() => renderCrop()).observe(el.cropBox.parentElement);
+  video.addEventListener('loadeddata', renderCrop);
+  el.image.addEventListener('load', renderCrop);
+
   el.setIn.addEventListener('click', setInAtPlayhead);
   el.setOut.addEventListener('click', setOutAtPlayhead);
   el.splitBtn.addEventListener('click', splitAtPlayhead);
@@ -410,7 +526,9 @@ export function initMonitor() {
   on('selection', renderMonitor);
   on('monitor', renderMonitor);
   on('sequence', renderMonitor);
-  on('output', renderTrack);
+  on('output', () => { renderTrack(); renderCrop(); });
+  on('plan', renderCrop); // with Format on Auto, the canvas shape comes from the plan
+  on('sequence-live', renderCrop);
   on('sources', () => { for (const s of state.sources.values()) requestThumbs(s); });
   on('thumbs', (id) => { if (clipSource(currentClip())?.id === id) renderTrack(); });
 }

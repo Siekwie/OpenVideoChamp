@@ -646,11 +646,13 @@ test('selective colour: one colour kept, the rest grey, until the colour returns
   assert.ok(!graphOf(buildArgs(planExport(lib, gone, opts), lib, gone)[0]).includes('colorhold'));
 });
 
-test('hit flash: a white flash at the hit point; a weaker one starts part-way into a longer fade', () => {
+test('hit flash: a white flash on the hit that fades over 0.35 s, as strong as asked', () => {
   const r = vert({ clips: [{ sourceId: 's_1', start: 2, end: 8, hit: 6, flash: 1 }] });
-  assert.match(graphOf(buildArgs(planExport(lib, r, opts), lib, r)[0]), /fade=t=in:st=4:d=0\.35:color=white:enable='gte\(t,4\)'/);
-  const half = vert({ clips: [{ sourceId: 's_1', start: 2, end: 8, hit: 6, flash: 0.5 }] });
-  assert.match(graphOf(buildArgs(planExport(lib, half, opts), lib, half)[0]), /fade=t=in:st=3\.65:d=0\.7:color=white:enable='gte\(t,4\)'/);
+  assert.match(graphOf(buildArgs(planExport(lib, r, opts), lib, r)[0]),
+    /eq=brightness='0\.9\*1\*max\(0,1-\(t-4\)\/0\.35\)':saturation='1-1\*max\(0,1-\(t-4\)\/0\.35\)':eval=frame:enable='between\(t,4,4\.35\)'/);
+  // at half rate the hit is 8 s into the clip; a weak flash is fainter, not longer
+  const half = vert({ clips: [{ sourceId: 's_1', start: 2, end: 8, rate: 0.5, hit: 6, flash: 0.3 }] });
+  assert.match(graphOf(buildArgs(planExport(lib, half, opts), lib, half)[0]), /eq=brightness='0\.9\*0\.3\*max\(0,1-\(t-8\)\/0\.35\)'.*enable='between\(t,8,8\.35\)'/);
   assert.throws(() => planExport(lib, vert({ clips: [{ sourceId: 's_1', start: 2, end: 8, flash: 1 }] }), opts), /flash needs a hit point/);
   const outside = planExport(lib, vert({ clips: [{ sourceId: 's_1', start: 2, end: 8, hit: 9, flash: 1 }] }), opts);
   assert.match(outside.warnings.join(' '), /hit point is outside the clip/);

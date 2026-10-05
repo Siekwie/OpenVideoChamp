@@ -293,7 +293,11 @@ export function createServer({ ffmpeg, ffprobe, capabilities, tmpDir, publicDir 
     ['GET', /^\/api\/sources\/([\w-]+)\/highlights$/, async (req, res, url, id) => {
       const src = source(id);
       if (src.kind !== 'video') throw new HttpError(400, `${src.name} is not a video`);
-      return analysed('highlights', src);
+      const h = await analysed('highlights', src);
+      // ?start=&end=: also the best hit inside that range (what a clip of this source should use).
+      if (!url.searchParams.has('start') && !url.searchParams.has('end')) return h;
+      const start = Number(url.searchParams.get('start')) || 0, end = Number(url.searchParams.get('end')) || src.duration;
+      return { ...h, best: await hitIn(src, start, end) };
     }],
     ['POST', /^\/api\/montage$/, async (req) => montage(await readJson(req))],
     ['POST', /^\/api\/plan$/, async (req) => plan(await readJson(req))],

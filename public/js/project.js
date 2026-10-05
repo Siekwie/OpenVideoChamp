@@ -2,7 +2,7 @@
 // Sources are stored by path; loading re-registers them with the server. Uploaded files live in the
 // server's temp dir and are gone after a restart, so they may fail to restore.
 import { api } from './api.js';
-import { state, on, addSource, afterEdit, select, emit, newId, OUTPUT_VALUES, DEFAULT_MUSIC } from './state.js';
+import { state, on, addSource, afterEdit, select, emit, fullClip, clipRequest, OUTPUT_VALUES, DEFAULT_MUSIC, ASPECTS, FITS } from './state.js';
 
 const AUTOSAVE_KEY = 'ovc.project';
 export const PROJECT_VERSION = 1;
@@ -13,13 +13,14 @@ export function projectName() {
 }
 
 export function serializeProject() {
-  const used = new Set([...state.clips.map((c) => c.sourceId), state.music?.sourceId].filter(Boolean));
+  const used = new Set([...state.clips.flatMap((c) => [c.sourceId, ...c.sounds.map((x) => x.sourceId)]), state.music?.sourceId].filter(Boolean));
   return {
     app: 'OpenVideoChamp', version: PROJECT_VERSION, name: projectName(), savedAt: new Date().toISOString(),
     sources: [...used].map((id) => state.sources.get(id)).filter(Boolean).map((s) => ({ id: s.id, path: s.path, name: s.name, kind: s.kind, uploaded: s.uploaded })),
-    clips: state.clips.map((c) => ({ id: c.id, sourceId: c.sourceId, start: c.start, end: c.end, volume: c.volume, mute: c.mute })),
+    clips: state.clips.map((c) => ({ id: c.id, ...clipRequest(c) })),
     transitions: state.transitions.map((t) => ({ type: t.type, duration: t.duration })),
     fadeIn: state.fadeIn, fadeOut: state.fadeOut, normalize: state.normalize,
+    aspect: state.aspect, fit: state.fit, look: state.look,
     music: state.music ? { ...state.music } : null,
     output: { ...state.output },
   };
@@ -45,12 +46,15 @@ export async function loadProject(from) {
   for (const src of data.sources) addSource(src);
   state.clips = data.clips.map((c) => {
     const src = state.sources.get(c.sourceId);
-    return { id: newId(), sourceId: src.id, start: Number(c.start) || 0, end: Number(c.end) || src.duration, volume: Number(c.volume ?? 1), mute: !!c.mute };
+    return fullClip({ ...c, id: null, sourceId: src.id, start: Number(c.start) || 0, end: Number(c.end) || src.duration, volume: Number(c.volume ?? 1), mute: !!c.mute });
   });
   state.transitions = data.transitions.map((t) => (t && t.type && t.type !== 'cut' ? { type: t.type, duration: Number(t.duration) || 0 } : { type: 'cut', duration: 0 }));
   state.fadeIn = data.fadeIn;
   state.fadeOut = data.fadeOut;
   state.normalize = data.normalize;
+  state.aspect = Object.hasOwn(ASPECTS, data.aspect) ? data.aspect : 'auto';
+  state.fit = FITS.includes(data.fit) ? data.fit : 'fit';
+  state.look = data.look || null;
   state.music = data.music ? { ...DEFAULT_MUSIC, ...data.music } : null;
   state.projectName = data.name;
   const out = data.output || {};

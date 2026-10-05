@@ -1,12 +1,20 @@
-// Title card dialog: renders text on a 1920x1080 canvas in the browser and uploads it as a PNG source.
+// Title card dialog: renders text on a canvas the shape of the video (1920x1080, 1080x1920, ...) in the
+// browser and uploads it as a PNG source.
 import { $ } from './util.js';
 import { upload } from './api.js';
+import { canvasRatio } from './state.js';
 
 const el = {};
 for (const id of ['cardDialog', 'cardForm', 'cardCanvas', 'cardTitle', 'cardSubtitle', 'cardBg', 'cardFg', 'cardAccent', 'cardStyle', 'cardSeconds', 'cardLogo', 'cardLogoFile', 'cardCancelBtn', 'cardAddBtn']) el[id] = $(id);
 
-const W = 1920, H = 1080;
+let W = 1920, H = 1080;
 let logo = null; // HTMLImageElement
+
+// The card size for the video's shape: 1080 on the short side.
+function cardSize() {
+  const r = canvasRatio() || 16 / 9;
+  return r >= 1 ? { w: Math.round((1080 * r) / 2) * 2, h: 1080 } : { w: 1080, h: Math.round(1080 / r / 2) * 2 };
+}
 let onAdd = () => {}, onError = () => {};
 
 function fitFont(ctx, text, weight, maxWidth, maxPx, minPx) {
@@ -33,7 +41,7 @@ export function drawCard(canvas, opts) {
   ctx.fillRect(0, 0, W, H);
 
   const left = opts.style === 'left' || opts.style === 'bar';
-  const margin = 160;
+  const margin = W < H ? 110 : 160;
   const maxWidth = W - margin * 2;
   ctx.textAlign = left ? 'left' : 'center';
   ctx.textBaseline = 'alphabetic';
@@ -45,7 +53,7 @@ export function drawCard(canvas, opts) {
   const subPx = subtitle ? fitFont(ctx, subtitle, '500', maxWidth, 56, 28) : 0;
   let logoH = 0, logoW = 0;
   if (opts.useLogo && logo?.naturalWidth) {
-    logoH = Math.min(300, H * 0.28);
+    logoH = Math.min(300, H * 0.28, W * 0.4);
     logoW = logo.naturalWidth * (logoH / logo.naturalHeight);
     if (logoW > maxWidth) { logoW = maxWidth; logoH = logo.naturalHeight * (logoW / logo.naturalWidth); }
   }
@@ -86,6 +94,10 @@ function options() {
 function preview() { drawCard(el.cardCanvas, options()); }
 
 export function openTitleCard() {
+  ({ w: W, h: H } = cardSize());
+  el.cardCanvas.width = Math.round(W / 3);
+  el.cardCanvas.height = Math.round(H / 3);
+  el.cardCanvas.classList.toggle('tall', H > W);
   preview();
   el.cardDialog.showModal();
   el.cardTitle.focus();

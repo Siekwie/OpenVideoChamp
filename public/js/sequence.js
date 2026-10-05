@@ -1,8 +1,8 @@
 // The sequence strip: one block per clip, markers between them for transitions, drag to reorder,
 // and the music lane underneath.
 import { $, h, clamp, fmtShort, fmtSec, sizeCanvas, drawCover } from './util.js';
-import { state, on, source, clipSource, clipLength, clipOffsets, totalDuration, selectClip, select, moveClip, setTransition, isImage, canUndo, canRedo, undo, redo,
-  DEFAULT_TRANSITION } from './state.js';
+import { state, on, emit, source, clipSource, clipLength, clipOffsets, totalDuration, selectClip, select, moveClip, setTransition, isImage, canUndo, canRedo, undo, redo,
+  clipRate, DEFAULT_TRANSITION } from './state.js';
 import { api } from './api.js';
 import { thumbAt, seek } from './monitor.js';
 import { transitionLabel } from './transitions.js';
@@ -24,6 +24,9 @@ function clipBlock(c, i) {
   if (isImage(c)) badges.push(h('span', { class: 'badge', text: 'still' }));
   if (c.mute) badges.push(h('span', { class: 'badge', text: 'muted' }));
   else if (c.volume !== 1) badges.push(h('span', { class: 'badge', text: `${Math.round(c.volume * 100)}%` }));
+  if (clipRate(c) !== 1) badges.push(h('span', { class: 'badge', text: `${clipRate(c)}×` }));
+  if (c.keepColor) badges.push(h('span', { class: 'badge', text: 'colour' }));
+  const hitFrac = c.hit != null && c.end > c.start ? (c.hit - c.start) / (c.end - c.start) : -1;
   const block = h('div', {
     class: `clip${selected ? ' selected' : ''}${isImage(c) ? ' image' : ''}`,
     dataset: { index: i },
@@ -31,6 +34,7 @@ function clipBlock(c, i) {
     title: `${src?.name || '?'} · ${fmtSec(len)}`,
   },
   canvas,
+  hitFrac >= 0 && hitFrac <= 1 ? h('div', { class: 'cliphit', style: { left: `${hitFrac * 100}%` }, title: 'Hit' }) : null,
   h('div', { class: 'cliplabel' }, h('span', { class: 'clipname', text: src?.name || 'missing' }), h('span', { class: 'cliplen num', text: fmtSec(len, 1) })),
   badges.length ? h('div', { class: 'clipbadges' }, ...badges) : null);
   block._draw = () => drawClipThumb(canvas, c, src);
@@ -105,12 +109,13 @@ export function renderSequence() {
     wrap.append(clipBlock(c, i));
   });
   for (const b of wrap.querySelectorAll('.clip')) b._draw();
+  renderBeats();
   const total = totalDuration();
   const n = state.clips.length;
   const tr = state.transitions.filter((t) => t.type !== 'cut').length;
   const bits = [`${n} clip${n === 1 ? '' : 's'}`, fmtShort(total)];
   if (tr) bits.push(`${tr} transition${tr === 1 ? '' : 's'}`);
-  if (state.music) bits.push('music');
+  if (state.music) bits.push(state.beats?.bpm ? `music ${state.beats.bpm} BPM` : 'music');
   el.seqInfo.textContent = n ? bits.join(' · ') : '';
   el.undoBtn.disabled = !canUndo();
   el.redoBtn.disabled = !canRedo();
@@ -120,6 +125,54 @@ export function renderSequence() {
 
 function redrawThumbs() {
   for (const b of el.seqClips.querySelectorAll('.clip')) b._draw?.();
+}
+
+// ---------- beats of the music ----------
+
+// x position (in the scrolling clip strip) of a time on the output timeline, or null past the end.
+function timelineX(t) {
+  const offsets = clipOffsets();
+  let i = offsets.findIndex((o, k) => t >= o.start && (k === offsets.length - 1 || t < offsets[k + 1].start));
+  if (i < 0) return null;
+  const block = el.seqClips.querySelector(`.clip[data-index="${i}"]`);
+  const o = offsets[i];
+  if (!block || t > o.end) return null;
+  return block.offsetLeft + ((t - o.start) / Math.max(0.001, o.end - o.start)) * block.offsetWidth;
+}
+
+// Tick marks under the clips where the beats fall (taller on the first beat of a bar).
+function renderBeats() {
+  el.seqClips.querySelector('.beatlayer')?.remove();
+  const m = state.music, b = state.beats;
+  if (!m || !b || b.sourceId !== m.sourceId || !b.beats.length) return;
+  const total = totalDuration();
+  const src = source(m.sourceId);
+  const period = src ? src.duration - m.start : 0;
+  const bars = new Set(b.downbeats);
+  const ticks = [];
+  for (let k = 0; k === 0 || (m.loop && period > 1 && k * period < total); k++) {
+    for (const t of b.beats) {
+      const at = t - m.start + k * period;
+      if (at < 0 || at > total) continue;
+      const x = timelineX(at);
+      if (x != null) ticks.push(h('i', { class: bars.has(t) ? 'bar' : '', style: { left: `${x}px` } }));
+    }
+  }
+  el.seqClips.append(h('div', { class: 'beatlayer', title: `${b.bpm} BPM` }, ...ticks));
+}
+
+// Analyses the music track's beats once per track (the server caches them too).
+let beatsLoading = null;
+function ensureBeats() {
+  const m = state.music;
+  if (!m || state.beats?.sourceId === m.sourceId || beatsLoading === m.sourceId) return;
+  const id = beatsLoading = m.sourceId;
+  api.beats(id).then((b) => ({ sourceId: id, ...b }), () => ({ sourceId: id, bpm: null, beats: [], downbeats: [] })).then((b) => {
+    beatsLoading = null;
+    if (state.music?.sourceId !== id) return;
+    state.beats = b;
+    emit('beats');
+  });
 }
 
 // ---------- preview playhead ----------
@@ -180,14 +233,12 @@ function onUp(e) {
   if (!d) return;
   drag = null;
   if (!d.active) {
-    // plain click: select and scrub to the clicked moment of the clip
+    // plain click: select and scrub to the clicked moment of the clip (measured before selecting rebuilds the strip)
     const c = state.clips[d.from];
+    const r = d.block.getBoundingClientRect();
+    const frac = clamp((e.clientX - r.left) / r.width, 0, 1);
     selectClip(d.from);
-    if (c && !isImage(c)) {
-      const r = d.block.getBoundingClientRect();
-      const frac = clamp((e.clientX - r.left) / r.width, 0, 1);
-      seek(c.start + frac * (c.end - c.start));
-    }
+    if (c && !isImage(c)) seek(c.start + frac * (c.end - c.start));
     return;
   }
   d.block.classList.remove('dragging');
@@ -210,7 +261,9 @@ export function initSequence() {
   });
   el.undoBtn.addEventListener('click', undo);
   el.redoBtn.addEventListener('click', redo);
-  new ResizeObserver(() => { redrawThumbs(); renderSeqPlayhead(); }).observe(el.seqClips);
+  new ResizeObserver(() => { redrawThumbs(); renderSeqPlayhead(); renderBeats(); }).observe(el.seqClips);
+  on('sequence', ensureBeats);
+  on('beats', renderSequence);
 
   on('sequence', renderSequence);
   on('sequence-live', () => { redrawThumbs(); });

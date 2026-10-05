@@ -3,15 +3,16 @@ import { $, h, clamp, fmtShort } from './js/util.js';
 import { api, upload } from './js/api.js';
 import { state, on, emit, addSource, addClip, removeClip, duplicateClip, moveClip, select, selectClip, selectedIndex, setMusic, setTransition, undo, redo, clearSequence,
   loadOutputOptions, DEFAULT_MUSIC } from './js/state.js';
-import { initMonitor, togglePlay, stepFrames, jumpTo, setInAtPlayhead, setOutAtPlayhead, splitAtPlayhead, renderMonitor } from './js/monitor.js';
+import { initMonitor, togglePlay, stepFrames, jumpTo, setInAtPlayhead, setOutAtPlayhead, splitAtPlayhead, renderMonitor, renderCrop } from './js/monitor.js';
 import { initSequence, setSequenceHandlers, renderSequence } from './js/sequence.js';
-import { initInspector, setInspectorHandlers, renderInspector } from './js/inspector.js';
+import { initInspector, setInspectorHandlers, renderInspector, setHitAtPlayhead, onInspectorLive } from './js/inspector.js';
+import { initMontage, openMontage, applyMontageStyle } from './js/montage.js';
 import { initOutput, startExport, startPreview, cancelJobs, requestPlan, renderOptions } from './js/output.js';
 import { initTitleCard, openTitleCard } from './js/titlecard.js';
 import { initProject, downloadProject, loadProjectFile, loadProject, autosaved, clearAutosave, projectName } from './js/project.js';
 
 const el = {};
-for (const id of ['app', 'projectName', 'addMenu', 'addBtn', 'addFileBtn', 'addCardBtn', 'addMusicBtn', 'addFromSep', 'addFromLabel', 'addFromList', 'projectMenu', 'projectBtn',
+for (const id of ['app', 'projectName', 'montageBtn', 'addMenu', 'addBtn', 'addFileBtn', 'addCardBtn', 'addMusicBtn', 'addFromSep', 'addFromLabel', 'addFromList', 'projectMenu', 'projectBtn',
   'saveProjectBtn', 'openProjectBtn', 'newProjectBtn', 'copyDocsBtn', 'helpBtn', 'fileInput', 'projectInput', 'openBtn2', 'cardBtn2', 'dropError', 'toasts',
   'restoreBar', 'restoreText', 'restoreBtn', 'restoreDismissBtn', 'helpDialog', 'helpCloseBtn', 'version']) el[id] = $(id);
 
@@ -46,10 +47,13 @@ function useAsMusic(src) {
 }
 
 // Puts a freshly opened source where it belongs: videos and images become clips, audio becomes the
-// music track (unless there already is one). `music` forces "use this as the music".
-function placeSource(src, { seconds, music = false } = {}) {
+// music track (unless there already is one). `music` forces "use this as the music"; `onPick` hands a
+// sound to whoever asked for one (a clip's sound on hit).
+function placeSource(src, { seconds, music = false, onPick = null } = {}) {
   addSource(src);
-  if (music) {
+  if (onPick) {
+    if (src.hasAudio) onPick(src); else showError(`${src.name} has no sound.`);
+  } else if (music) {
     if (src.hasAudio) useAsMusic(src); else showError(`${src.name} has no sound to use as music.`);
   } else if (src.kind !== 'audio') addClip(src, { seconds });
   else if (!state.music) useAsMusic(src);
@@ -61,26 +65,28 @@ async function openPath(path) {
 }
 
 // Without a native dialog the browser's own file picker is used; it has to remember what the pick is for.
-function pickInBrowser(music) {
-  el.fileInput.dataset.music = music ? '1' : '';
-  el.fileInput.multiple = !music;
+let pickFor = null;
+function pickInBrowser(music, onPick) {
+  pickFor = { music, onPick };
+  el.fileInput.multiple = !music && !onPick;
   el.fileInput.click();
 }
 
-async function openDialog({ music = false } = {}) {
-  if (state.info?.dialog === false) return pickInBrowser(music);
+async function openDialog({ music = false, onPick = null } = {}) {
+  const one = music || !!onPick;
+  if (state.info?.dialog === false) return pickInBrowser(music, onPick);
   try {
-    const data = await api.openDialog(!music);
-    if (data.unsupported) return pickInBrowser(music);
+    const data = await api.openDialog(!one);
+    if (data.unsupported) return pickInBrowser(music, onPick);
     if (data.cancelled) return;
-    for (const src of data.sources || [data]) placeSource(src, { music });
+    for (const src of data.sources || [data]) placeSource(src, { music, onPick });
     for (const f of data.failed || []) showError(`${f.path.split(/[\\/]/).pop()}: ${f.error}`);
   } catch (err) {
-    if (err.message === 'Failed to fetch') pickInBrowser(music); else showError(err.message);
+    if (err.message === 'Failed to fetch') pickInBrowser(music, onPick); else showError(err.message);
   }
 }
 
-async function uploadFiles(files, { music = false } = {}) {
+async function uploadFiles(files, { music = false, onPick = null } = {}) {
   const list = [...files].filter((f) => f && f.size);
   const project = list.find((f) => /\.json$/i.test(f.name));
   if (project) return openProjectFile(project);
@@ -88,7 +94,7 @@ async function uploadFiles(files, { music = false } = {}) {
     const t = toast(`Importing ${file.name}…`, { ttl: 0, progress: true });
     try {
       const src = await upload(file, file.name, { onProgress: (f) => t.update(`Importing ${file.name} · ${Math.round(f * 100)}%`, f) });
-      placeSource(src, { music });
+      placeSource(src, { music, onPick });
     } catch (err) {
       showError(`${file.name}: ${err.message}`);
     }
@@ -195,6 +201,7 @@ function onKey(e) {
     case 'i': case 'I': setInAtPlayhead(); break;
     case 'o': case 'O': setOutAtPlayhead(); break;
     case 's': case 'S': splitAtPlayhead(); break;
+    case 'h': case 'H': setHitAtPlayhead(); break;
     case 'd': case 'D': if (i >= 0) duplicateClip(i); break;
     case 'p': case 'P': startPreview(); break;
     case 'ArrowLeft': e.preventDefault(); stepFrames(-1, e.shiftKey); break;
@@ -221,16 +228,22 @@ function init() {
   initProject();
   const addMusic = () => openDialog({ music: true });
   setSequenceHandlers({ add: (anchor) => toggleMenu(el.addMenu, anchor), addMusic });
-  setInspectorHandlers({ addMusic });
+  setInspectorHandlers({
+    addMusic, addSound: (onPick) => openDialog({ onPick }), montage: openMontage, montageStyle: applyMontageStyle,
+    toast: (message, kind = 'info') => toast(message, { kind, ttl: 6000 }),
+  });
+  onInspectorLive(renderCrop);
+  initMontage({ notify: (message, kind = 'ok') => toast(message, { kind, ttl: 9000 }) });
+  el.montageBtn.addEventListener('click', openMontage);
 
   el.addBtn.addEventListener('click', () => toggleMenu(el.addMenu, el.addBtn));
   el.projectBtn.addEventListener('click', () => toggleMenu(el.projectMenu, el.projectBtn));
-  el.addFileBtn.addEventListener('click', () => { closeMenus(); openDialog(); });
+  el.addFileBtn.addEventListener('click', () => { closeMenus(); pickFor = null; openDialog(); });
   el.addCardBtn.addEventListener('click', () => { closeMenus(); openTitleCard(); });
   el.addMusicBtn.addEventListener('click', () => { closeMenus(); addMusic(); });
   el.openBtn2.addEventListener('click', () => openDialog());
   el.cardBtn2.addEventListener('click', openTitleCard);
-  el.fileInput.addEventListener('change', () => { uploadFiles(el.fileInput.files, { music: !!el.fileInput.dataset.music }); el.fileInput.value = ''; });
+  el.fileInput.addEventListener('change', () => { uploadFiles(el.fileInput.files, pickFor || {}); pickFor = null; el.fileInput.value = ''; });
   el.saveProjectBtn.addEventListener('click', () => { closeMenus(); if (state.clips.length) downloadProject(); else toast('Nothing to save yet'); });
   el.openProjectBtn.addEventListener('click', () => { closeMenus(); el.projectInput.click(); });
   el.projectInput.addEventListener('change', () => { if (el.projectInput.files[0]) openProjectFile(el.projectInput.files[0]); el.projectInput.value = ''; });

@@ -631,10 +631,10 @@ function effectFilters(c, globalLook) {
   const blur = Math.max(c.look?.motionBlur || 0, globalLook?.motionBlur || 0);
   if (blur > 0) out.push(`tmix=frames=${1 + Math.max(1, Math.round(blur * 4))}`);
   if (c.flash > 0) {
-    // A white flash that fades out over FLASH_SECONDS; a weaker flash starts part-way into a longer fade.
-    const d = FLASH_SECONDS / c.flash;
-    const st = Math.max(0, c.hitAt - (1 - c.flash) * d);
-    out.push(`fade=t=in:st=${f6(st)}:d=${f6(d)}:color=white:enable='gte(t,${f6(c.hitAt)})'`);
+    // A white flash on the hit that fades out over FLASH_SECONDS: brightness up and colour out, by `flash`.
+    const at = f6(c.hitAt), d = f6(FLASH_SECONDS);
+    const k = `${f3(c.flash)}*max(0,1-(t-${at})/${d})`;
+    out.push(`eq=brightness='0.9*${k}':saturation='1-${k}':eval=frame:enable='between(t,${at},${f6(c.hitAt + FLASH_SECONDS)})'`);
   }
   return out;
 }

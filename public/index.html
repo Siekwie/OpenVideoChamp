@@ -14,6 +14,7 @@
     <span class="brand"><img src="icon.svg" alt="" width="18" height="18"> OpenVideoChamp</span>
     <span class="projectname" id="projectName" title="Project">Untitled</span>
     <span class="spacer"></span>
+    <button type="button" class="needs-file" id="montageBtn" title="Auto-edit a montage: find the goal in every clip, trim around it, cut on the beats of the music">✦ Auto-edit</button>
     <div class="menu" id="addMenu">
       <button type="button" class="primary-soft" id="addBtn" aria-haspopup="menu" aria-expanded="false">
         <svg viewBox="0 0 12 12" width="11" height="11"><path d="M6 1v10M1 6h10" stroke="currentColor" stroke-width="1.6" fill="none"/></svg>
@@ -62,6 +63,7 @@
         <video id="video" preload="auto" playsinline hidden></video>
         <img id="image" alt="" hidden>
         <video id="thumbVideo" preload="auto" muted playsinline hidden></video>
+        <div class="cropbox" id="cropBox" hidden><div class="cropframe" id="cropFrame" title="Drag to choose what stays in the frame"><span class="croplabel" id="cropLabel"></span></div></div>
         <div class="monitorbadge" id="monitorBadge" hidden></div>
         <div class="monitornote" id="monitorNote" hidden></div>
         <button type="button" class="monitorback" id="backToSourceBtn" hidden>Back to editing</button>
@@ -90,6 +92,7 @@
           <div class="dim" id="dimR"></div>
           <div class="selbody" id="selBody"></div>
           <div class="snapmark" id="snapMark" hidden></div>
+          <div class="trackmarks" id="trackMarks"></div>
           <div class="handle" id="hIn" data-handle="in" title="In"><i></i></div>
           <div class="handle" id="hOut" data-handle="out" title="Out"><i></i></div>
           <div class="playhead" id="playhead"><i></i></div>
@@ -123,6 +126,7 @@
   <section class="output">
     <div class="row controls">
       <div class="seg" id="presets" role="radiogroup" aria-label="Preset">
+        <button type="button" data-preset="tiktok" title="TikTok, YouTube Shorts, Instagram Reels: vertical 1080×1920 (unless Format says otherwise), 60 fps max, high quality (CRF 18)">TikTok / Shorts</button>
         <button type="button" data-preset="steam" title="Steam store trailer: 1080p max, 60 fps max, high quality (CRF 18), no size limit">Steam</button>
         <button type="button" data-preset="discord" title="Under 10 MB (Discord free upload limit)">Discord 10 MB</button>
         <button type="button" data-preset="discord50" title="Under 50 MB (Discord Nitro Basic)">50 MB</button>
@@ -211,6 +215,32 @@
   </form>
 </dialog>
 
+<dialog class="modal" id="montageDialog">
+  <form method="dialog" class="modalbody montageform" id="montageForm">
+    <h2>Auto-edit montage</h2>
+    <p class="muted">Finds the goal (the bang and the flash) in every clip and trims the clip around it: a build-up, the goal, a short hold, a hard cut.
+      The build-up gets shorter clip by clip, so the video speeds up towards the end. With music, every goal and every cut lands on a beat.</p>
+    <div class="field">
+      <span class="fieldlabel">Build-up before the goal</span>
+      <span class="unit">first clip <input type="number" id="mSetupA" min="0.5" max="30" step="0.5" value="5" class="num"> s, last clip <input type="number" id="mSetupB" min="0.5" max="30" step="0.5" value="2.5" class="num"> s</span>
+    </div>
+    <div class="field">
+      <span class="fieldlabel">Hold after the goal</span>
+      <span class="unit"><input type="number" id="mHold" min="0" max="10" step="0.1" value="0.8" class="num"> s</span>
+    </div>
+    <label class="field"><span class="fieldlabel">Cut to the music</span>
+      <select id="mSync"><option value="beat">Goals and cuts on the beat</option><option value="bar">Goals on the first beat of a bar</option><option value="off">Don't follow the music</option></select></label>
+    <p class="fieldhint" id="mMusicNote"></p>
+    <label class="check"><input type="checkbox" id="mStyle" checked> Vertical montage style: 9:16, filled frame, punchy colours, game audio under the music, TikTok export</label>
+    <label class="check"><input type="checkbox" id="mRedetect"> Find the goals again (replaces the hit points already set)</label>
+    <p class="montagestatus" id="mStatus" aria-live="polite"></p>
+    <div class="modalactions">
+      <button type="button" id="mCancel">Cancel</button>
+      <button type="submit" class="primary" id="mGo">Auto-edit</button>
+    </div>
+  </form>
+</dialog>
+
 <dialog class="modal" id="helpDialog">
   <div class="modalbody help">
     <h2>OpenVideoChamp</h2>
@@ -224,6 +254,13 @@
           <li>Click the <b>music</b> bar under the clips for its volume and fades; <b>Whole video</b> on the right has the fade in / out and loudness.</li>
           <li><kbd>P</kbd> renders a quick draft and plays it. Then choose <b>Steam</b> (or a Discord size) and press <b>Export</b>.</li>
         </ol>
+        <h3 class="helpsub">Making a vertical montage</h3>
+        <ol>
+          <li>Add your gameplay clips and a song (start the song at its drop: select the music bar, <i>Start in track</i>).</li>
+          <li>Press <b>✦ Auto-edit</b>: it finds the goal in every clip, trims a build-up before it and a short hold after it, with less build-up clip by clip, and lands every goal and cut on a beat. Its style option makes the video 9:16 with filled frames, punchy colours and a TikTok export.</li>
+          <li>Per clip, open <b>Framing</b> and drag the frame on the picture to keep the action in view (<i>Animate…</i> to follow it); <b>Colour</b> has looks and <i>Keep one colour</i> with the moment the colour returns; <b>Goal / hit</b> adds a flash or a sound on the goal (<kbd>H</kbd> sets it at the playhead); <b>Speed</b> for slow motion.</li>
+          <li><kbd>P</kbd> for a draft, then export with <b>TikTok / Shorts</b>.</li>
+        </ol>
         <p class="muted">A single clip with nothing applied and the <i>No limit</i> preset is copied without re-encoding (instant, keyframe accurate). Everything else is re-encoded frame accurately.</p>
       </div>
       <div>
@@ -234,6 +271,7 @@
           <tr><td><kbd>←</kbd> / <kbd>→</kbd></td><td>Step one frame (<kbd>Shift</kbd>: one second)</td></tr>
           <tr><td><kbd>Home</kbd> / <kbd>End</kbd></td><td>Jump to in / out point</td></tr>
           <tr><td><kbd>S</kbd></td><td>Split clip at playhead</td></tr>
+          <tr><td><kbd>H</kbd></td><td>Set the clip's hit (goal) at the playhead</td></tr>
           <tr><td><kbd>D</kbd></td><td>Duplicate clip</td></tr>
           <tr><td><kbd>Delete</kbd></td><td>Remove the selected clip, transition or music</td></tr>
           <tr><td><kbd>,</kbd> / <kbd>.</kbd></td><td>Previous / next clip</td></tr>

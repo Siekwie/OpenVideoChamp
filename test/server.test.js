@@ -487,6 +487,9 @@ test('montage: beats of a track, the hit of a gameplay clip, an auto-edit cut to
   assert.ok(Math.abs(h.data.hits[0].t - 4.5) <= 0.1, JSON.stringify(h.data.hits));
   assert.ok(h.data.loudness.length >= 150 && h.data.brightness.length >= 150);
   assert.equal((await api('GET', `/api/sources/${beat.id}/highlights`)).status, 400); // not a video
+  const ranged = await api('GET', `/api/sources/${goal.id}/highlights?start=3&end=7`);
+  assert.ok(Math.abs(ranged.data.best - 4.5) <= 0.1, JSON.stringify(ranged.data.best));
+  assert.equal((await api('GET', `/api/sources/${goal.id}/highlights?start=0&end=3`)).data.best, null);
 
   // three copies of the clip; the second has its own hit, the third is trimmed so its goal is cut off
   const m = await api('POST', '/api/montage', {
