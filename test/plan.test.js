@@ -272,7 +272,15 @@ test('short clip under a size target is capped at 1.5x the source bitrate instea
 
 test('normalizeRequest: legacy request becomes a one-clip sequence; transitions are padded/typed', () => {
   const r = normalizeRequest(req({ start: 1, end: 2 }));
-  assert.deepEqual(r.clips, [{ sourceId: 's_1', start: 1, end: 2, volume: 1, mute: false }]);
+  assert.deepEqual(r.clips, [{
+    sourceId: 's_1', start: 1, end: 2, volume: 1, mute: false,
+    rate: 1, fit: null, zoom: 1, pan: [], look: null, keepColor: null, hit: null, flash: 0, sounds: [],
+  }]);
+  assert.equal(r.aspect, 'auto');
+  assert.equal(r.fit, 'fit');
+  assert.equal(r.look, null);
+  // the encoder speed at the top level is not the clip's playback rate
+  assert.equal(normalizeRequest(req({ speed: 'best', rate: 2 })).clips[0].rate, 2);
   assert.deepEqual(r.transitions, []);
   assert.equal(r.music, null);
   assert.equal(r.fadeIn, 0);
@@ -333,24 +341,32 @@ test('cuts concat, fades wrap the ends, chained offsets account for earlier tran
 });
 
 test('timeline: clips and transitions are whole frames, audio is cut to the same lengths', () => {
-  // 0.517 s at 30 fps is 15.51 frames: video can only be 16 frames, so the audio must be 16 frames long too
+  // 0.517 s at 30 fps is 15.51 frames: video can only be whole frames, so the audio is cut to the same
+  // frame counts. The clip boundaries are rounded, not the lengths, so the cuts stay within half a frame
+  // of the nominal timeline (16 + 15 + 16 ... frames, not 16 every time, which would drift).
   const clips = Array.from({ length: 4 }, (_, i) => ({ sourceId: 's_b', start: i, end: i + 0.517 }));
   const one = { sourceId: 's_tall', start: 0, end: 0.517 };
   const r = seqReq({ clips: [...clips, one], transitions: ['cut', 'cut', { type: 'fade', duration: 0.21 }, 'cut'], fadeOut: 0.5 });
   const p = planExport(lib, r, opts);
   assert.equal(p.fps, 30);
-  assert.equal(p.duration, 2.467); // (5 * 16 - 6) / 30, not the nominal 5 * 0.517 - 0.21 = 2.375
+  assert.equal(p.duration, 2.367); // 71 frames; the nominal length is 5 * 0.517 - 0.21 = 2.375
   const seq = resolveSequence(normalizeRequest(r), lib);
-  assert.deepEqual(timeline(seq, 30), { frames: [16, 16, 16, 16, 16], overlap: [0, 0, 6, 0], total: 74, duration: 74 / 30 });
+  assert.deepEqual(timeline(seq, 30), { frames: [16, 15, 16, 16, 15], overlap: [0, 0, 7, 0], total: 71, duration: 71 / 30 });
   const [args] = buildArgs(p, lib, r);
   const g = graphOf(args);
-  assert.equal(g.match(/trim=end_frame=16,/g).length, 5);
-  assert.match(g, /\[4:a\][^;]*apad=whole_len=25600,atrim=end_sample=25600,afade=t=in:d=0.005,afade=t=out:st=0.528333:d=0.005\[a4\]/);
-  assert.equal(g.match(/anullsrc=r=48000:cl=stereo,atrim=end_sample=25600/g).length, 4);
-  assert.match(g, /\[x2\]\[v3\]xfade=transition=fade:duration=0.2:offset=1.4\[x3\]/); // 6 frames, starting at frame 48 - 6
-  assert.match(g, /acrossfade=ns=9600:/);
-  assert.match(g, /fade=t=out:st=1.966667:d=0.5\[vout\]/);
-  assert.equal(allValues(args, '-t').at(-1), '2.466667');
+  assert.equal(g.match(/trim=end_frame=16,/g).length, 3);
+  assert.equal(g.match(/trim=end_frame=15,/g).length, 2);
+  assert.match(g, /\[4:a\][^;]*apad=whole_len=24000,atrim=end_sample=24000,afade=t=in:d=0.005,afade=t=out:st=0.495:d=0.005\[a4\]/);
+  assert.equal(g.match(/anullsrc=r=48000:cl=stereo,atrim=end_sample=25600/g).length, 3);
+  assert.match(g, /\[x2\]\[v3\]xfade=transition=fade:duration=0.233333:offset=1.333333\[x3\]/); // 7 frames, starting at frame 47 - 7
+  assert.match(g, /acrossfade=ns=11200:/);
+  assert.match(g, /fade=t=out:st=1.866667:d=0.5\[vout\]/);
+  assert.equal(allValues(args, '-t').at(-1), '2.366667');
+  // many clips: every boundary stays within half a frame of its nominal time
+  const many = resolveSequence(normalizeRequest(seqReq({ clips: Array.from({ length: 40 }, (_, i) => ({ sourceId: 's_b', start: i * 0.1, end: i * 0.1 + 0.437 })), transitions: [] })), lib);
+  const tl40 = timeline(many, 30);
+  let at = 0;
+  tl40.frames.forEach((n, i) => { at += n; assert.ok(Math.abs(at / 30 - (i + 1) * 0.437) <= 0.5 / 30 + 1e-9, `boundary ${i}`); });
   // two transitions that fill a clip exactly are trimmed by a frame when rounding pushes them past it
   const tight = resolveSequence(normalizeRequest(seqReq({
     clips: [{ sourceId: 's_b', start: 0, end: 2 }, { sourceId: 's_b', start: 0, end: 0.5 }, { sourceId: 's_b', start: 0, end: 2 }],
@@ -502,4 +518,182 @@ test('resolveSequence exposes the timeline the UI needs', () => {
   assert.equal(video, '[vout]');
   assert.equal(audio, '[aout]');
   assert.match(graph, /xfade=transition=fade:duration=1:offset=4/);
+});
+
+// ------------------------------------------------------------------ vertical montage features
+
+const vert = (over = {}) => ({
+  clips: [{ sourceId: 's_1', start: 2, end: 8 }],
+  transitions: [], preset: 'tiktok', resolution: 'auto', fps: 'auto', audio: 'keep', speed: 'balanced', encoder: 'auto', fit: 'fill', ...over,
+});
+const clipGraph = (g, k = 0) => g.split(';').filter((p) => p.startsWith(`[${k}:v]`) || p.endsWith(`[v${k}]`)).join(';');
+
+test('tiktok preset: 9:16 canvas at 1080x1920 from a 1080p landscape clip, CRF 18, 60 fps cap, cropped to fill', () => {
+  const p = planExport(lib, vert(), opts);
+  assert.equal(p.aspect, '9:16');
+  assert.equal(p.width, 1080);
+  assert.equal(p.height, 1920);
+  assert.equal(p.crf, 18);
+  assert.equal(p.audioKbps, 192);
+  assert.equal(p.fps, 60);
+  assert.equal(p.outputPath, P('/videos/clip_tiktok.mp4'));
+  const [args] = buildArgs(p, lib, vert());
+  const g = graphOf(args);
+  // 1080 * 9/16 = 607.5 → 606 wide, centred in the 1314 px of room
+  assert.match(g, /\[0:v\]setpts=PTS-STARTPTS,fps=60,crop=w=606:h=1080:x=657:y=0,scale=1080:1920:flags=bicubic,setsar=1,format=yuv420p,/);
+  // letterboxed instead with fit, and an explicit aspect works with any preset; resolution is the short side there
+  const fit = planExport(lib, vert({ fit: 'fit', preset: 'steam', aspect: '9:16', resolution: 720 }), opts);
+  assert.equal(fit.width, 720);
+  assert.equal(fit.height, 1280);
+  assert.match(graphOf(buildArgs(fit, lib, vert({ fit: 'fit', preset: 'steam', aspect: '9:16', resolution: 720 }))[0]),
+    /fps=60,scale=720:1280:force_original_aspect_ratio=decrease:flags=bicubic,pad=720:1280:\(ow-iw\)\/2:\(oh-ih\)\/2,setsar=1/);
+  // other shapes; the draft preview caps the short side at 480
+  assert.deepEqual(((x) => [x.width, x.height])(planExport(lib, vert({ aspect: '1:1' }), opts)), [1080, 1080]);
+  assert.deepEqual(((x) => [x.width, x.height])(planExport(lib, vert({ aspect: '4:5' }), opts)), [1080, 1350]);
+  assert.deepEqual(((x) => [x.width, x.height])(planExport(lib, vert({ preview: true }), opts)), [480, 854]);
+  // never larger than the sharpest short side: a 720p clip gives a 720x1280 canvas
+  const small = planExport(lib, vert({ clips: [{ sourceId: 's_b', start: 0, end: 4 }] }), opts);
+  assert.deepEqual([small.width, small.height], [720, 1280]);
+  // a size target picks the short side by the bits-per-pixel rule
+  const d = planExport(lib, vert({ preset: 'discord', aspect: '9:16', clips: [{ sourceId: 's_1', start: 0, end: 30 }] }), opts);
+  assert.equal(d.aspect, '9:16');
+  assert.equal(planExport(lib, vert({ preset: 'discord' }), opts).aspect, 'auto'); // only tiktok implies 9:16
+  assert.ok(d.width < d.height && d.width <= 720, `${d.width}x${d.height}`);
+  assert.ok(bpp(d) >= 0.05);
+  // a portrait clip in a 9:16 canvas needs no crop
+  const tall = vert({ clips: [{ sourceId: 's_tall', start: 0, end: 4 }] });
+  const tg = graphOf(buildArgs(planExport(lib, tall, opts), lib, tall)[0]);
+  assert.ok(!tg.includes('crop='), tg);
+});
+
+test('reframing: zoom, a fixed position and keyframed pans become crop expressions in clip time', () => {
+  const r = vert({ clips: [{ sourceId: 's_1', start: 2, end: 8, zoom: 2, pan: { x: 0, y: 1 } }] });
+  const g = graphOf(buildArgs(planExport(lib, r, opts), lib, r)[0]);
+  // zoom 2 halves the 606x1080 window; x: 0 = left edge, y: 1 = bottom edge
+  assert.match(g, /crop=w=302:h=540:x=0:y=540,scale=1080:1920/);
+
+  // pan keyframes are in source time; at rate 2 they land at half the distance from the clip start
+  const k = vert({ clips: [{ sourceId: 's_1', start: 2, end: 8, rate: 2, pan: [{ t: 3, x: 0 }, { t: 6, x: 1 }] }] });
+  const kg = clipGraph(graphOf(buildArgs(planExport(lib, k, opts), lib, k)[0]));
+  assert.match(kg, /setpts=\(PTS-STARTPTS\)\/2,fps=60,crop=w=606:h=1080:x='floor\(if\(lt\(t,0\.5\),0,if\(lt\(t,2\),0\+1314\*\(t-0\.5\)\/1\.5,1314\)\)\)':y=0,/);
+
+  // zoom also works in fit mode (crop keeps the source shape) and on stills (a Ken Burns pan)
+  const z = vert({ fit: 'fit', aspect: '16:9', preset: 'cut', cut: 'precise', clips: [{ sourceId: 's_img', end: 4, zoom: 1.25, pan: [{ t: 0, x: 0 }, { t: 4, x: 1 }] }] });
+  const zg = graphOf(buildArgs(planExport(lib, z, opts), lib, z)[0]);
+  assert.match(zg, /crop=w=1536:h=864:x='floor\(if\(lt\(t,0\),0,if\(lt\(t,4\),0\+384\*\(t-0\)\/4,384\)\)\)':y=108,scale=1920:1080:flags=bicubic/);
+});
+
+test('blur fill: the clip letterboxed over a blurred copy of itself', () => {
+  const r = vert({ fit: 'blur' });
+  const g = graphOf(buildArgs(planExport(lib, r, opts), lib, r)[0]);
+  assert.match(g, /\[0:v\]setpts=PTS-STARTPTS,fps=60,split=2\[bg0\]\[fg0\]/);
+  assert.match(g, /\[bg0\]scale=134:240:force_original_aspect_ratio=increase,crop=134:240,gblur=sigma=6,eq=brightness=-0\.06,scale=1080:1920,setsar=1\[bb0\]/);
+  assert.match(g, /\[fg0\]scale=1080:1920:force_original_aspect_ratio=decrease:flags=bicubic,setsar=1\[ff0\]/);
+  assert.match(g, /\[bb0\]\[ff0\]overlay=\(W-w\)\/2:\(H-h\)\/2,setsar=1,format=yuv420p,tpad=stop=-1:stop_mode=clone,trim=end_frame=360,settb=AVTB\[v0\]/);
+  // per-clip fit wins over the sequence default
+  const mixed = vert({ fit: 'blur', clips: [{ sourceId: 's_1', start: 2, end: 8, fit: 'fill' }] });
+  assert.ok(!graphOf(buildArgs(planExport(lib, mixed, opts), lib, mixed)[0]).includes('split'));
+});
+
+test('playback rate: shorter on the timeline, setpts + chained atempo, the input still reads the source range', () => {
+  const r = seqReq({ clips: [{ sourceId: 's_1', start: 2, end: 6, rate: 2 }, { sourceId: 's_1', start: 10, end: 11, rate: 0.25 }], transitions: ['cut'] });
+  const p = planExport(lib, r, opts);
+  assert.equal(p.duration, 6); // 4 s at 2x + 1 s at 0.25x
+  const [args] = buildArgs(p, lib, r);
+  assert.deepEqual(allValues(args, '-t').slice(0, 2), ['4', '1']);
+  const g = graphOf(args);
+  assert.match(g, /\[0:v\]setpts=\(PTS-STARTPTS\)\/2,fps=60,.*trim=end_frame=120,/);
+  assert.match(g, /\[1:v\]setpts=\(PTS-STARTPTS\)\/0\.25,fps=60,.*trim=end_frame=240,/);
+  assert.match(g, /\[0:a\]asetpts=PTS-STARTPTS,aresample=48000:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo,atempo=2,apad=whole_len=96000,/);
+  assert.match(g, /\[1:a\][^;]*,atempo=0\.5,atempo=0\.5,apad=whole_len=192000,/);
+  const fast = normalizeRequest(seqReq({ clips: [{ sourceId: 's_1', end: 8, rate: 3 }] }));
+  assert.equal(fast.clips[0].rate, 3);
+  assert.match(graphOf(buildArgs(planExport(lib, { ...seqReq(), clips: [{ sourceId: 's_1', end: 8, rate: 3 }], transitions: [] }, opts), lib,
+    { ...seqReq(), clips: [{ sourceId: 's_1', end: 8, rate: 3 }], transitions: [] })[0]), /atempo=2,atempo=1\.5,/);
+  // a sped-up clip can never be stream copied
+  assert.equal(planExport(src(), req({ preset: 'cut', cut: 'fast', start: 0, end: 4, rate: 2 }), opts).mode, 'encode');
+});
+
+test('looks: per-clip and whole-video grades, tint, sharpen and motion blur on every clip before it is scaled', () => {
+  const r = vert({
+    look: { contrast: 1.15, saturation: 1.4, sharpen: 0.5, motionBlur: 0.5 },
+    clips: [
+      { sourceId: 's_1', start: 2, end: 4, look: { brightness: 0.05, hue: -20, tint: { color: '#ff00ff', amount: 0.5 } } },
+      { sourceId: 's_1', start: 6, end: 8 },
+    ],
+    transitions: ['cut'],
+  });
+  const g = graphOf(buildArgs(planExport(lib, r, opts), lib, r)[0]);
+  const c0 = clipGraph(g, 0), c1 = clipGraph(g, 1);
+  assert.match(c0, /crop=[^,]+,eq=brightness=0\.05:contrast=1:saturation=1:gamma=1,hue=h=-20,colorbalance=rs=0\.083:gs=-0\.167:bs=0\.083:rm=0\.167:gm=-0\.333:bm=0\.167:rh=0\.1:gh=-0\.2:bh=0\.1:pl=1,eq=brightness=0:contrast=1\.15:saturation=1\.4:gamma=1,unsharp=5:5:0\.5:5:5:0,tmix=frames=3,scale=1080:1920/);
+  assert.match(c1, /crop=[^,]+,eq=brightness=0:contrast=1\.15:saturation=1\.4:gamma=1,unsharp=5:5:0\.5:5:5:0,tmix=frames=3,scale=1080:1920/);
+  // a look that changes nothing is no look
+  assert.equal(normalizeRequest(vert({ look: { contrast: 1, saturation: 1 } })).look, null);
+  assert.throws(() => normalizeRequest(vert({ look: { saturation: 9 } })), /look saturation/);
+  assert.throws(() => normalizeRequest(vert({ look: { tint: { color: 'pink' } } })), /tint color/);
+});
+
+test('selective colour: one colour kept, the rest grey, until the colour returns at a source time', () => {
+  const r = vert({ clips: [{ sourceId: 's_1', start: 2, end: 8, rate: 2, keepColor: { color: '#E0301E', range: 0.35, until: 6 } }] });
+  const g = clipGraph(graphOf(buildArgs(planExport(lib, r, opts), lib, r)[0]));
+  assert.match(g, /colorhold=color=0xe0301e:similarity=0\.35:blend=0\.1:enable='lt\(t,2\)'/); // (6 - 2) / 2
+  const both = vert({ clips: [{ sourceId: 's_1', start: 2, end: 8, keepColor: { from: 3, until: 5 } }] });
+  assert.match(graphOf(buildArgs(planExport(lib, both, opts), lib, both)[0]), /colorhold=color=0xe0301e:similarity=0\.3:blend=0\.1:enable='between\(t,1,3\)'/);
+  const whole = vert({ clips: [{ sourceId: 's_1', start: 2, end: 8, keepColor: true }] });
+  assert.match(graphOf(buildArgs(planExport(lib, whole, opts), lib, whole)[0]), /colorhold=color=0xe0301e:similarity=0\.3:blend=0\.1,/);
+  // colour that already came back before the clip starts: nothing to do
+  const gone = vert({ clips: [{ sourceId: 's_1', start: 2, end: 8, keepColor: { until: 1 } }] });
+  assert.ok(!graphOf(buildArgs(planExport(lib, gone, opts), lib, gone)[0]).includes('colorhold'));
+});
+
+test('hit flash: a white flash at the hit point; a weaker one starts part-way into a longer fade', () => {
+  const r = vert({ clips: [{ sourceId: 's_1', start: 2, end: 8, hit: 6, flash: 1 }] });
+  assert.match(graphOf(buildArgs(planExport(lib, r, opts), lib, r)[0]), /fade=t=in:st=4:d=0\.35:color=white:enable='gte\(t,4\)'/);
+  const half = vert({ clips: [{ sourceId: 's_1', start: 2, end: 8, hit: 6, flash: 0.5 }] });
+  assert.match(graphOf(buildArgs(planExport(lib, half, opts), lib, half)[0]), /fade=t=in:st=3\.65:d=0\.7:color=white:enable='gte\(t,4\)'/);
+  assert.throws(() => planExport(lib, vert({ clips: [{ sourceId: 's_1', start: 2, end: 8, flash: 1 }] }), opts), /flash needs a hit point/);
+  const outside = planExport(lib, vert({ clips: [{ sourceId: 's_1', start: 2, end: 8, hit: 9, flash: 1 }] }), opts);
+  assert.match(outside.warnings.join(' '), /hit point is outside the clip/);
+});
+
+test('clip sounds: extra inputs after the music, delayed to their place on the timeline and mixed in', () => {
+  const r = seqReq({
+    clips: [
+      { sourceId: 's_1', start: 5, end: 10, hit: 8, sounds: [{ sourceId: 's_mus', volume: 0.7 }] },
+      { sourceId: 's_b', start: 0, end: 4, sounds: [{ sourceId: 's_mus', at: 1 }, { sourceId: 's_mus', at: 9 }] },
+    ],
+    music: { sourceId: 's_mus', volume: 0.4 },
+  });
+  const p = planExport(lib, r, opts);
+  assert.match(p.warnings.join(' '), /placed outside the clip/);
+  const [args] = buildArgs(p, lib, r);
+  // clips 0, 1; music 2; sounds 3, 4
+  assert.equal(args.filter((a) => a === P('/music/song.mp3')).length, 3);
+  const g = graphOf(args);
+  assert.match(g, /\[3:a\]asetpts=PTS-STARTPTS,aresample=48000:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=0\.7,adelay=delays=3000:all=1,atrim=end_sample=384000\[s3\]/);
+  // clip 2 starts at 4 s (5 s minus the 1 s crossfade); its sound is 1 s in
+  assert.match(g, /\[4:a\][^;]*adelay=delays=5000:all=1,atrim=end_sample=384000\[s4\]/);
+  assert.match(g, /\[y1\]\[m\]\[s3\]\[s4\]amix=inputs=4:duration=first:dropout_transition=0:normalize=0\[mix\]/);
+  // with "music only" the sounds still play; a silent sequence with a sound has an audio track
+  const rep = { ...r, music: { sourceId: 's_mus', mode: 'replace' } };
+  assert.match(graphOf(buildArgs(planExport(lib, rep, opts), lib, rep)[0]), /\[m\]\[s3\]\[s4\]amix=inputs=3:/);
+  const quiet = seqReq({ clips: [{ sourceId: 's_b', start: 0, end: 2, sounds: [{ sourceId: 's_mus', at: 0.5 }] }], transitions: [] });
+  const qp = planExport(lib, quiet, opts);
+  assert.ok(qp.audioKbps > 0);
+  assert.match(graphOf(buildArgs(qp, lib, quiet)[0]), /\[a0\]\[s1\]amix=inputs=2:/);
+  assert.throws(() => planExport(lib, seqReq({ clips: [{ sourceId: 's_1', end: 2, sounds: [{ sourceId: 's_b' }] }], transitions: [] }), opts), /has no audio/);
+  assert.throws(() => planExport(lib, seqReq({ clips: [{ sourceId: 's_1', end: 2, sounds: [{ sourceId: 's_mus' }] }], transitions: [], outputPath: P('/music/song.mp3') }), opts), /differ from the/);
+});
+
+test('montage features validate their input', () => {
+  for (const [over, re] of [
+    [{ aspect: '21:9' }, /Invalid aspect/],
+    [{ fit: 'stretch' }, /Invalid fit/],
+    [{ clips: [{ sourceId: 's_1', end: 2, fit: 'zoom' }] }, /Clip 1 fit/],
+    [{ clips: [{ sourceId: 's_1', end: 2, rate: 8 }] }, /rate/],
+    [{ clips: [{ sourceId: 's_1', end: 2, zoom: 0.5 }] }, /zoom/],
+    [{ clips: [{ sourceId: 's_1', end: 2, pan: [{ x: 2 }] }] }, /pan keyframe 1 x/],
+    [{ clips: [{ sourceId: 's_1', end: 2, keepColor: { color: 'red' } }] }, /keepColor color/],
+    [{ clips: [{ sourceId: 's_1', end: 2, sounds: [{}] }] }, /no sourceId/],
+  ]) assert.throws(() => normalizeRequest(vert(over)), re, JSON.stringify(over));
 });

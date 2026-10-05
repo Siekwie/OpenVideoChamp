@@ -12,6 +12,8 @@ import { Jobs, isTerminal } from './jobs.js';
 import { dialogAvailable, openFileDialog, reveal } from './dialog.js';
 import { resolveProject } from './project.js';
 import { normalizeCard, renderTitleCard } from './titlecard.js';
+import { beats as analyseBeats, highlights as analyseHighlights, findHits } from './analysis.js';
+import { arrangeMontage, beatGrid, normalizeMontage } from './montage.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 export const VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version;
@@ -102,6 +104,65 @@ export function createServer({ ffmpeg, ffprobe, capabilities, tmpDir, publicDir 
   const cardDir = path.join(outputDir, 'title-cards');
   const jobs = new Jobs({ ffmpeg, tmpDir, capabilities: caps });
   const versionPromise = ffmpegVersion(ffmpeg).catch(() => 'unknown');
+
+  // Beat and highlight analysis: computed once per source, at most two ffmpeg decodes at a time.
+  const analyses = new Map(); // "beats:s_x" / "highlights:s_x" -> Promise
+  let analysing = 0;
+  const waiting = [];
+  async function slot(fn) {
+    if (analysing >= 2) await new Promise((resolve) => waiting.push(resolve));
+    analysing++;
+    try { return await fn(); } finally { analysing--; waiting.shift()?.(); }
+  }
+  function analysed(kind, src) {
+    const key = `${kind}:${src.id}`;
+    if (!analyses.has(key)) {
+      const run = slot(() => (kind === 'beats' ? analyseBeats(ffmpeg, src) : analyseHighlights(ffmpeg, src)))
+        .catch((e) => { analyses.delete(key); throw new HttpError(500, `Could not analyse ${src.name}: ${e.message}`); });
+      analyses.set(key, run);
+    }
+    return analyses.get(key);
+  }
+
+  // The best hit inside a clip's range, from the source's loudness/brightness curves.
+  async function hitIn(src, start, end) {
+    const h = await analysed('highlights', src);
+    const a = Math.max(0, Math.floor(start / h.step)), b = Math.ceil(end / h.step);
+    const [best] = findHits({ step: h.step, loudness: h.loudness?.slice(a, b), brightness: h.brightness?.slice(a, b) }, { count: 1 });
+    return best ? Math.round((a * h.step + best.t) * 1000) / 1000 : null;
+  }
+
+  async function montage(body) {
+    if (!body || typeof body !== 'object' || !Array.isArray(body.clips) || !body.clips.length) throw new HttpError(400, 'clips must be a non-empty array');
+    const options = normalizeMontage(body);
+    const clips = await Promise.all(body.clips.map(async (c, i) => {
+      if (!c || typeof c !== 'object') throw new HttpError(400, `Clip ${i + 1} must be an object`);
+      const src = getSource(c.sourceId);
+      if (src.kind === 'audio') throw new HttpError(400, `Clip ${i + 1}: "${src.name}" has no video`);
+      const image = src.kind === 'image';
+      const start = Number(c.start) || 0, end = c.end == null ? src.duration : Number(c.end);
+      let hit = c.hit == null || c.hit === '' ? null : Number(c.hit);
+      // A hit outside the clip is no help in arranging it; look for one inside.
+      if (hit != null && !(hit >= start && hit <= end)) hit = null;
+      if (hit == null && !image && body.detect !== false) hit = await hitIn(src, start, end);
+      return { ...c, start, end, hit, image, duration: image ? end : src.duration };
+    }));
+    let grid = null, bpm = null;
+    if (body.music && options.sync !== 'off') {
+      const m = getSource(body.music.sourceId);
+      if (!m.hasAudio) throw new HttpError(400, `Music: "${m.name}" has no audio`);
+      const b = await analysed('beats', m);
+      bpm = b.bpm;
+      const until = clips.reduce((s, c) => s + c.duration, 0) + 60;
+      grid = beatGrid(b, { start: Number(body.music.start) || 0, loop: body.music.loop !== false, until });
+    }
+    const r = arrangeMontage(clips, options, grid);
+    return {
+      clips: r.clips.map(({ image, duration, ...c }) => c),
+      transitions: r.clips.slice(1).map(() => ({ type: 'cut', duration: 0 })),
+      timeline: r.timeline, sync: r.sync, bpm, notes: r.notes,
+    };
+  }
 
   function source(id) {
     const s = sources.get(id);
@@ -224,6 +285,17 @@ export function createServer({ ffmpeg, ffprobe, capabilities, tmpDir, publicDir 
     ['GET', /^\/api\/sources\/([\w-]+)$/, (req, res, url, id) => source(id)],
     ['GET', /^\/api\/sources\/([\w-]+)\/keyframes$/, async (req, res, url, id) => ({ times: await keyframeCache.get(source(id).id) })],
     ['GET', /^\/api\/sources\/([\w-]+)\/stream$/, (req, res, url, id) => sendMedia(req, res, source(id).path)],
+    ['GET', /^\/api\/sources\/([\w-]+)\/beats$/, async (req, res, url, id) => {
+      const src = source(id);
+      if (!src.hasAudio) throw new HttpError(400, `${src.name} has no audio`);
+      return analysed('beats', src);
+    }],
+    ['GET', /^\/api\/sources\/([\w-]+)\/highlights$/, async (req, res, url, id) => {
+      const src = source(id);
+      if (src.kind !== 'video') throw new HttpError(400, `${src.name} is not a video`);
+      return analysed('highlights', src);
+    }],
+    ['POST', /^\/api\/montage$/, async (req) => montage(await readJson(req))],
     ['POST', /^\/api\/plan$/, async (req) => plan(await readJson(req))],
     ['POST', /^\/api\/export$/, async (req) => {
       const body = await readJson(req);

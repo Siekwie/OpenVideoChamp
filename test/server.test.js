@@ -360,9 +360,9 @@ test('export: a transition after a hard cut works, and many odd-length clips kee
   assert.equal(status, 200, JSON.stringify(data));
   const job = await waitForJob(data.jobId, (j) => ['done', 'error', 'cancelled'].includes(j.status), 90_000);
   assert.equal(job.status, 'done', job.log);
-  assert.equal(job.plan.duration, 6.2); // (12 * 16 - 6) frames at 30 fps
+  assert.equal(job.plan.duration, 6); // 180 frames at 30 fps: within half a frame of the nominal 12 * 0.517 - 0.2
   const [video, audio] = probeField(job.outputPath, 'stream=duration').split('\n').map(Number);
-  assert.ok(Math.abs(video - 6.2) < 0.04, `video ${video}`);
+  assert.ok(Math.abs(video - 6) < 0.04, `video ${video}`);
   assert.ok(Math.abs(audio - video) < 0.04, `audio ${audio} vs video ${video}`);
 });
 
@@ -453,4 +453,94 @@ test('POST /api/project opens a project file, re-registers its media and returns
   const out = cli([file, '--preset', 'cut', '--res', '360', '--out', path.join(WORK, 'sample_render.mp4')]);
   assert.equal(out, path.join(WORK, 'sample_render.mp4'));
   assert.ok(Math.abs(duration(out) - 3.5) <= 0.15, `duration ${duration(out)}`);
+});
+
+// ------------------------------------------------------------------ montage
+
+const GOAL = path.join(WORK, 'goal.mp4'); // a "goal" at 4.5 s: a white flash and a loud boom
+const BEAT = path.join(WORK, 'beat.wav'); // a kick drum at 120 BPM from 0.25 s
+
+test('montage: beats of a track, the hit of a gameplay clip, an auto-edit cut to the beats, and a vertical export with every effect', async () => {
+  if (!fs.existsSync(GOAL)) {
+    execFileSync(ffmpeg, ['-y', '-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=30:duration=8',
+      '-f', 'lavfi', '-i', "aevalsrc='0.03*(random(0)-0.5)+if(between(t,4.5,5.3),0.9*(random(1)-0.5)*exp(-(t-4.5)*4),0)':s=48000:d=8",
+      '-vf', "drawbox=x=0:y=0:w=iw:h=ih:color=white@0.85:t=fill:enable='between(t,4.5,4.85)'", '-c:v', 'libx264', '-preset', 'ultrafast', '-c:a', 'aac', '-shortest', GOAL]);
+  }
+  if (!fs.existsSync(BEAT)) {
+    const k = 'mod(t-0.25,0.5)';
+    execFileSync(ffmpeg, ['-y', '-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i',
+      `aevalsrc='sin(2*PI*(50+80*exp(-${k}*25))*${k})*exp(-${k}*10)*gte(t,0.25)+0.05*sin(2*PI*330*t)':s=22050:d=20`, BEAT]);
+  }
+  const goal = (await api('POST', '/api/open', { path: GOAL })).data;
+  const beat = (await api('POST', '/api/open', { path: BEAT })).data;
+
+  const b = await api('GET', `/api/sources/${beat.id}/beats`);
+  assert.equal(b.status, 200, JSON.stringify(b.data));
+  assert.ok(Math.abs(b.data.bpm - 120) < 1.5, `bpm ${b.data.bpm}`);
+  assert.ok(Math.abs(b.data.beats[0] - 0.25) < 0.03, `first beat ${b.data.beats[0]}`);
+  assert.ok(b.data.downbeats.length >= b.data.beats.length / 4 - 1);
+  assert.ok(Math.abs(b.data.duration - 20) < 0.1);
+  assert.equal((await api('GET', `/api/sources/${cardId}/beats`)).status, 400); // no audio
+
+  const h = await api('GET', `/api/sources/${goal.id}/highlights`);
+  assert.equal(h.status, 200, JSON.stringify(h.data));
+  assert.ok(Math.abs(h.data.hits[0].t - 4.5) <= 0.1, JSON.stringify(h.data.hits));
+  assert.ok(h.data.loudness.length >= 150 && h.data.brightness.length >= 150);
+  assert.equal((await api('GET', `/api/sources/${beat.id}/highlights`)).status, 400); // not a video
+
+  // three copies of the clip; the second has its own hit, the third is trimmed so its goal is cut off
+  const m = await api('POST', '/api/montage', {
+    clips: [{ sourceId: goal.id, volume: 0.6 }, { sourceId: goal.id, hit: 3 }, { sourceId: goal.id, start: 0, end: 4 }],
+    music: { sourceId: beat.id }, setup: [3, 1.5], hold: 0.6, sync: 'beat',
+  });
+  assert.equal(m.status, 200, JSON.stringify(m.data));
+  assert.equal(m.data.sync, 'beat');
+  assert.ok(Math.abs(m.data.bpm - 120) < 1.5);
+  assert.equal(m.data.clips[0].volume, 0.6); // other fields survive
+  assert.ok(Math.abs(m.data.clips[0].hit - 4.5) <= 0.1);
+  assert.equal(m.data.clips[1].hit, 3);
+  assert.deepEqual(m.data.transitions, [{ type: 'cut', duration: 0 }, { type: 'cut', duration: 0 }]);
+  const onBeat = (t) => b.data.beats.some((x) => Math.abs(x - t) < 0.002);
+  for (const t of m.data.timeline.slice(0, 2)) {
+    assert.ok(t.onBeat && onBeat(t.hit) && onBeat(t.end), JSON.stringify(m.data.timeline));
+  }
+  assert.ok(m.data.timeline[0].hit - m.data.timeline[0].start > m.data.timeline[1].hit - m.data.timeline[1].start);
+  assert.equal((await api('POST', '/api/montage', { clips: [] })).status, 400);
+  assert.equal((await api('POST', '/api/montage', { clips: [{ sourceId: goal.id }], sync: 'nope' })).status, 400);
+
+  // the montage as a vertical draft with framing, a pan, a look, selective colour, a flash and a sound
+  const clips = m.data.clips.map((c) => ({ ...c, flash: c.hit != null ? 0.7 : 0 }));
+  clips[0] = { ...clips[0], pan: [{ t: clips[0].start, x: 0.2 }, { t: clips[0].end, x: 0.8 }], keepColor: { color: '#e0501e', until: clips[0].hit }, sounds: [{ sourceId: musicId, volume: 0.5 }] };
+  clips[1] = { ...clips[1], rate: 1.25, look: { tint: { color: '#ff3cc8', amount: 0.4 } } };
+  clips.push({ sourceId: cardId, end: 1.5, fit: 'blur' });
+  const request = {
+    clips, transitions: [...m.data.transitions, { type: 'fadewhite', duration: 0.3 }],
+    aspect: '9:16', fit: 'fill', look: { contrast: 1.12, saturation: 1.35, sharpen: 0.35, motionBlur: 0.3 },
+    music: { sourceId: beat.id, volume: 0.8 }, preset: 'tiktok', preview: true,
+  };
+  const planned = await api('POST', '/api/plan', request);
+  assert.equal(planned.status, 200, JSON.stringify(planned.data));
+  assert.equal(planned.data.aspect, '9:16');
+  assert.deepEqual([planned.data.width, planned.data.height], [360, 640]); // the clip is 360p, the preview caps at 480
+  const { data } = await api('POST', '/api/export', request);
+  const job = await waitForJob(data.jobId, (j) => ['done', 'error', 'cancelled'].includes(j.status), 120_000);
+  assert.equal(job.status, 'done', job.log);
+  const [video, audio] = probeField(job.outputPath, 'stream=width,height,duration').split('\n');
+  assert.ok(video.startsWith('360,640,'), video);
+  assert.ok(Math.abs(Number(video.split(',')[2]) - job.plan.duration) < 0.05, `${video} vs ${job.plan.duration}`);
+  assert.ok(audio, 'has audio');
+
+  // a project carries the montage fields and the sound sources through a save/open
+  const project = {
+    app: 'OpenVideoChamp', version: 1,
+    sources: [{ id: 'g', path: GOAL }, { id: 'snd', path: MUSIC }],
+    clips: [{ sourceId: 'g', start: 1, end: 5, hit: 4.5, sounds: [{ sourceId: 'snd', at: 4.5 }, { sourceId: 'gone' }] }],
+    aspect: '9:16', fit: 'blur', look: { saturation: 1.3 },
+  };
+  const opened = await api('POST', '/api/project', { project });
+  assert.equal(opened.status, 200, JSON.stringify(opened.data));
+  assert.deepEqual(opened.data.clips[0].sounds, [{ sourceId: musicId, at: 4.5 }]);
+  assert.equal(opened.data.aspect, '9:16');
+  assert.equal(opened.data.fit, 'blur');
+  assert.deepEqual(opened.data.look, { saturation: 1.3 });
 });

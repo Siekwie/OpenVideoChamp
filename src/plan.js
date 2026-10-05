@@ -8,15 +8,22 @@
 import path from 'node:path';
 
 const PRESET_MB = { discord: 10, discord50: 50, discord500: 500 };
+// Presets without a size target that cap the canvas at 1080 (short side) and 60 fps, CRF 18.
+const HQ_PRESETS = new Set(['steam', 'tiktok']);
 const X264_PRESET = { fast: 'veryfast', balanced: 'medium', best: 'slow' };
 const MP4_VIDEO = new Set(['h264', 'hevc', 'av1', 'mpeg4']);
 const MP4_AUDIO = new Set(['aac', 'mp3', 'ac3', 'opus', 'alac']);
 const ENUMS = {
-  preset: ['cut', 'discord', 'discord50', 'discord500', 'steam', 'custom'],
+  preset: ['cut', 'discord', 'discord50', 'discord500', 'steam', 'tiktok', 'custom'],
   cut: ['fast', 'precise'],
   audio: ['keep', 'mute'],
   speed: ['fast', 'balanced', 'best'],
+  fit: ['fit', 'fill', 'blur'],
 };
+// Output canvas shapes. "auto" follows the clips (landscape unless portrait clips dominate); the tiktok
+// preset makes "auto" mean 9:16.
+export const ASPECTS = { auto: null, '16:9': 16 / 9, '9:16': 9 / 16, '1:1': 1, '4:5': 4 / 5 };
+export const FITS = ENUMS.fit;
 // Constant-quality flags for hardware encoders (libx264 uses -crf).
 const HW_QUALITY = {
   h264_nvenc: (q) => ['-rc', 'vbr', '-cq', String(q), '-b:v', '0'],
@@ -38,6 +45,9 @@ export const MAX_CLIPS = 100;
 export const MAX_IMAGE_DURATION = 600;
 export const MAX_FADE = 30;
 export const PREVIEW_HEIGHT = 480;
+export const MAX_SOUNDS = 20;
+export const MAX_PAN_KEYS = 50;
+export const FLASH_SECONDS = 0.35;
 const AUDIO_RATE = 48000;
 const EPS = 1e-6;
 
@@ -73,15 +83,116 @@ const fixed = (n, digits) => { const s = n.toFixed(digits); return s.includes('.
 const f3 = (n) => fixed(n, 3);
 const f6 = (n) => fixed(n, 6); // frame-derived times (n / fps) need more than milliseconds
 
+function hex(value, name, fallback) {
+  if (value == null || value === '') {
+    if (fallback !== undefined) return fallback;
+    fail(`${name} is required`);
+  }
+  const m = /^#?([0-9a-f]{6})$/i.exec(String(value));
+  if (!m) fail(`${name} must be a colour like "#e0301e"`);
+  return `#${m[1].toLowerCase()}`;
+}
+
+function oneOf(value, allowed, name, fallback) {
+  if (value == null || value === '') return fallback;
+  if (!allowed.includes(value)) fail(`Invalid ${name}: ${JSON.stringify(value)}`);
+  return value;
+}
+
+// A colour grade. Returns null when it changes nothing, so "no look" has a single representation.
+export function normalizeLook(input, name = 'look') {
+  if (input == null || input === false) return null;
+  if (typeof input !== 'object') fail(`${name} must be an object`);
+  let tint = null;
+  if (input.tint != null && input.tint !== false) {
+    const t = typeof input.tint === 'string' ? { color: input.tint } : input.tint;
+    if (typeof t !== 'object') fail(`${name} tint must be an object`);
+    tint = { color: hex(t.color, `${name} tint color`), amount: num(t.amount, `${name} tint amount`, { min: 0, max: 1, fallback: 0.3 }) };
+    if (!tint.amount) tint = null;
+  }
+  const look = {
+    brightness: num(input.brightness, `${name} brightness`, { min: -1, max: 1, fallback: 0 }),
+    contrast: num(input.contrast, `${name} contrast`, { min: 0, max: 3, fallback: 1 }),
+    saturation: num(input.saturation, `${name} saturation`, { min: 0, max: 3, fallback: 1 }),
+    gamma: num(input.gamma, `${name} gamma`, { min: 0.1, max: 10, fallback: 1 }),
+    hue: num(input.hue, `${name} hue`, { min: -180, max: 180, fallback: 0 }),
+    sharpen: num(input.sharpen, `${name} sharpen`, { min: 0, max: 2, fallback: 0 }),
+    motionBlur: num(input.motionBlur, `${name} motionBlur`, { min: 0, max: 1, fallback: 0 }),
+    tint,
+  };
+  const identity = !look.brightness && look.contrast === 1 && look.saturation === 1 && look.gamma === 1 && !look.hue
+    && !look.sharpen && !look.motionBlur && !look.tint;
+  return identity ? null : look;
+}
+
+// Reframing keyframes: [{ t, x, y }] (t in source seconds, x/y 0..1 = where the crop window sits inside
+// the room it has to move). A single { x, y } object is a fixed position.
+function normalizePan(input, name) {
+  if (input == null || input === false) return [];
+  const list = Array.isArray(input) ? input : [input];
+  if (list.length > MAX_PAN_KEYS) fail(`${name}: at most ${MAX_PAN_KEYS} keyframes`);
+  return list.map((k, i) => {
+    if (!k || typeof k !== 'object') fail(`${name} keyframe ${i + 1} must be an object`);
+    return {
+      t: num(k.t, `${name} keyframe ${i + 1} t`, { min: 0, fallback: 0 }),
+      x: num(k.x, `${name} keyframe ${i + 1} x`, { min: 0, max: 1, fallback: 0.5 }),
+      y: num(k.y, `${name} keyframe ${i + 1} y`, { min: 0, max: 1, fallback: 0.5 }),
+    };
+  }).sort((a, b) => a.t - b.t);
+}
+
+// Selective colour: everything but one colour turns grey, optionally only from/until a source time.
+function normalizeKeepColor(input, name) {
+  if (input == null || input === false) return null;
+  const k = input === true ? {} : input;
+  if (typeof k !== 'object') fail(`${name} must be an object`);
+  const time = (v, what) => (v == null || v === '' ? null : num(v, `${name} ${what}`, { min: 0 }));
+  return {
+    color: hex(k.color, `${name} color`, '#e0301e'),
+    range: num(k.range, `${name} range`, { min: 0.01, max: 1, fallback: 0.3 }),
+    softness: num(k.softness, `${name} softness`, { min: 0, max: 1, fallback: 0.1 }),
+    from: time(k.from, 'from'),
+    until: time(k.until, 'until'),
+  };
+}
+
+function normalizeSounds(input, name) {
+  if (input == null || input === false) return [];
+  if (!Array.isArray(input)) fail(`${name} must be an array`);
+  if (input.length > MAX_SOUNDS) fail(`${name}: at most ${MAX_SOUNDS} sounds per clip`);
+  return input.map((s, i) => {
+    if (!s || typeof s !== 'object') fail(`${name} ${i + 1} must be an object`);
+    if (typeof s.sourceId !== 'string' || !s.sourceId) fail(`${name} ${i + 1} has no sourceId`);
+    return {
+      sourceId: s.sourceId,
+      at: s.at == null || s.at === '' ? null : num(s.at, `${name} ${i + 1} at`, { min: 0 }),
+      volume: num(s.volume, `${name} ${i + 1} volume`, { min: 0, max: 4, fallback: 1 }),
+    };
+  });
+}
+
+// The fields of one clip; the legacy single-range request carries the same ones at the top level.
+const CLIP_KEYS = ['sourceId', 'start', 'end', 'volume', 'mute', 'rate', 'fit', 'zoom', 'pan', 'look', 'keepColor', 'hit', 'flash', 'sounds'];
+
 function normalizeClip(input, index) {
   if (!input || typeof input !== 'object') fail(`Clip ${index + 1} must be an object`);
   if (typeof input.sourceId !== 'string' || !input.sourceId) fail(`Clip ${index + 1} has no sourceId`);
+  const name = `Clip ${index + 1}`;
   return {
     sourceId: input.sourceId,
-    start: num(input.start, `Clip ${index + 1} start`, { fallback: 0 }),
-    end: num(input.end, `Clip ${index + 1} end`),
-    volume: num(input.volume, `Clip ${index + 1} volume`, { min: 0, max: 4, fallback: 1 }),
+    start: num(input.start, `${name} start`, { fallback: 0 }),
+    end: num(input.end, `${name} end`),
+    volume: num(input.volume, `${name} volume`, { min: 0, max: 4, fallback: 1 }),
     mute: bool(input.mute),
+    rate: num(input.rate, `${name} rate`, { min: 0.1, max: 4, fallback: 1 }), // playback speed
+    fit: oneOf(input.fit, FITS, `${name} fit`, null),
+    zoom: num(input.zoom, `${name} zoom`, { min: 1, max: 4, fallback: 1 }),
+    pan: normalizePan(input.pan, `${name} pan`),
+    look: normalizeLook(input.look, `${name} look`),
+    keepColor: normalizeKeepColor(input.keepColor, `${name} keepColor`),
+    hit: input.hit == null || input.hit === '' ? null : num(input.hit, `${name} hit`, { min: 0 }),
+    flash: num(input.flash === true ? 0.8 : input.flash, `${name} flash`, { min: 0, max: 1, fallback: 0 }),
+    sounds: normalizeSounds(input.sounds, `${name} sound`),
   };
 }
 
@@ -105,8 +216,9 @@ function normalizeMusic(input) {
 export function normalizeRequest(input = {}) {
   if (!input || typeof input !== 'object') fail('Expected a JSON object');
   const legacy = !Array.isArray(input.clips) || !input.clips.length;
+  // `look` and `fit` at the top level are the whole video's; the clip's own come from `clips`.
   const clips = legacy
-    ? [normalizeClip({ sourceId: input.sourceId, start: input.start, end: input.end, volume: input.volume, mute: input.mute }, 0)]
+    ? [normalizeClip(Object.fromEntries(CLIP_KEYS.filter((k) => k !== 'look' && k !== 'fit').map((k) => [k, input[k]])), 0)]
     : input.clips.map(normalizeClip);
   if (clips.length > MAX_CLIPS) fail(`At most ${MAX_CLIPS} clips per export`);
   const rawTr = Array.isArray(input.transitions) ? input.transitions : [];
@@ -128,6 +240,9 @@ export function normalizeRequest(input = {}) {
     fadeOut: num(input.fadeOut, 'fadeOut', { min: 0, max: MAX_FADE, fallback: 0 }),
     music: normalizeMusic(input.music),
     normalize: bool(input.normalize),
+    aspect: input.aspect ?? 'auto',
+    fit: input.fit ?? 'fit',
+    look: normalizeLook(input.look),
     preview: bool(input.preview),
     preset: input.preset ?? 'cut',
     targetMB: input.targetMB == null ? null : Number(input.targetMB),
@@ -142,6 +257,7 @@ export function normalizeRequest(input = {}) {
   for (const [key, allowed] of Object.entries(ENUMS)) {
     if (!allowed.includes(r[key])) fail(`Invalid ${key}: ${JSON.stringify(input[key])}`);
   }
+  if (!Object.hasOwn(ASPECTS, r.aspect)) fail(`Invalid aspect: ${JSON.stringify(input.aspect)}`);
   if (r.resolution !== 'auto' && r.resolution !== 'source' && !(Number.isInteger(r.resolution) && r.resolution >= 144 && r.resolution <= 4320)) {
     fail(`Invalid resolution: ${JSON.stringify(input.resolution)}`);
   }
@@ -157,6 +273,7 @@ const kindOf = (source) => source.kind || (source.width > 0 ? 'video' : 'audio')
 // Resolves source ids, validates every range and computes the timeline.
 export function resolveSequence(req, getSource, { transitions: available = ALL_TRANSITIONS } = {}) {
   const lookup = typeof getSource === 'function' ? getSource : (id) => getSource.get?.(id) ?? getSource[id];
+  const notes = [];
   const clips = req.clips.map((c, i) => {
     const source = lookup(c.sourceId);
     if (!source) fail(`Clip ${i + 1}: unknown source ${c.sourceId}`);
@@ -165,14 +282,48 @@ export function resolveSequence(req, getSource, { transitions: available = ALL_T
     const image = kind === 'image';
     const start = image ? 0 : c.start;
     const end = c.end;
-    const duration = end - start;
+    const srcDuration = end - start;
+    const rate = image ? 1 : c.rate;
     const label = req.clips.length > 1 ? `Clip ${i + 1} (${source.name})` : 'Range';
-    if (duration < 0.1) fail(`${label} must be at least 0.1 s long`);
+    if (srcDuration < 0.1) fail(`${label} must be at least 0.1 s long`);
     if (image) {
-      if (duration > MAX_IMAGE_DURATION) fail(`${label}: an image can be shown for at most ${MAX_IMAGE_DURATION} s`);
+      if (srcDuration > MAX_IMAGE_DURATION) fail(`${label}: an image can be shown for at most ${MAX_IMAGE_DURATION} s`);
     } else if (start < 0 || end > source.duration + 0.05) fail(`${label} is outside the source`);
     const audible = !image && !c.mute && source.hasAudio && req.audio !== 'mute';
-    return { source, start, end, duration, volume: c.volume, mute: c.mute, image, audible };
+    const duration = srcDuration / rate; // on the output timeline
+    // Everything below is placed in clip time: seconds from the clip's first output frame.
+    const local = (t) => (t - start) / rate;
+    const inside = (t) => t >= start - EPS && t <= end + EPS;
+
+    const hitAt = c.hit != null && inside(c.hit) ? local(c.hit) : null;
+    if (c.flash > 0 && c.hit == null) fail(`${label}: a flash needs a hit point (the moment it fires)`);
+    if (c.flash > 0 && hitAt == null) notes.push(`${label}: the hit point is outside the clip, so there is no flash.`);
+
+    let keepColor = null;
+    if (c.keepColor) {
+      const k = c.keepColor;
+      const from = k.from == null ? null : local(k.from), until = k.until == null ? null : local(k.until);
+      // A window that misses the clip entirely is no effect; one that covers all of it needs no `enable`.
+      if (!((until != null && until <= 0) || (from != null && from >= duration))) {
+        keepColor = { ...k, from: from != null && from > 0 ? from : null, until: until != null && until < duration ? until : null };
+      }
+    }
+
+    const sounds = [];
+    c.sounds.forEach((s, j) => {
+      const src = lookup(s.sourceId);
+      if (!src) fail(`${label}, sound ${j + 1}: unknown source ${s.sourceId}`);
+      if (!src.hasAudio) fail(`${label}, sound ${j + 1}: "${src.name}" has no audio`);
+      const at = s.at ?? c.hit ?? start;
+      if (!inside(at)) { notes.push(`${label}: sound "${src.name}" is placed outside the clip and is left out.`); return; }
+      sounds.push({ source: src, at: local(at), volume: s.volume });
+    });
+
+    return {
+      source, start, end, duration, srcDuration, rate, volume: c.volume, mute: c.mute, image, audible,
+      fit: c.fit ?? req.fit, zoom: c.zoom, pan: c.pan.map((k) => ({ ...k, t: local(k.t) })),
+      look: c.look, keepColor, hitAt, flash: hitAt == null ? 0 : c.flash, sounds,
+    };
   });
 
   const transitions = req.transitions.map((t, i) => {
@@ -199,15 +350,26 @@ export function resolveSequence(req, getSource, { transitions: available = ALL_T
     if (req.music.fadeIn + req.music.fadeOut > total + EPS) fail('Music fades are longer than the video');
     music = { ...req.music, source };
   }
-  return { clips, transitions, total, music, fadeIn: req.fadeIn, fadeOut: req.fadeOut, normalize: req.normalize };
+  return { clips, transitions, total, music, fadeIn: req.fadeIn, fadeOut: req.fadeOut, normalize: req.normalize, look: req.look, notes };
 }
 
 // The sequence in whole output frames. Every clip and transition is rounded to frames once, here, and
 // both the video and the audio graph are cut to those lengths: a video stream can only be whole frames
 // long, so audio cut to the nominal length would drift a little further ahead at every clip boundary.
+// The clip boundaries (not the lengths) are what gets rounded, so no cut is ever more than half a frame
+// from where the nominal timeline puts it: a montage cut to the beats of a song stays on them.
 export function timeline(seq, fps) {
-  const frames = seq.clips.map((c) => Math.max(1, Math.round(c.duration * fps)));
-  const overlap = seq.transitions.map((t) => (t.type === 'cut' ? 0 : Math.max(1, Math.round(t.duration * fps))));
+  const frames = [], overlap = [];
+  let nominal = 0, first = 0; // the clip's nominal start in seconds, and its first frame
+  seq.clips.forEach((c, k) => {
+    frames.push(Math.max(1, Math.round((nominal + c.duration) * fps) - first));
+    const t = seq.transitions[k];
+    if (!t) return;
+    nominal += c.duration - (t.type === 'cut' ? 0 : t.duration);
+    const end = first + frames[k];
+    overlap.push(t.type === 'cut' ? 0 : Math.max(1, end - Math.round(nominal * fps)));
+    first = end - overlap[k];
+  });
   // Rounding can push the two transitions around a short clip one frame past its length.
   frames.forEach((n, i) => {
     while ((overlap[i - 1] || 0) + (overlap[i] || 0) > n) {
@@ -225,9 +387,13 @@ const fmtKbps = (k) => (k >= 1000 ? `${(k / 1000).toFixed(2)} Mbps` : `${k} kbps
 // Can this request be a stream copy? Only a plain single video range with nothing applied to it.
 function copyEligible(req, seq) {
   const [c] = seq.clips;
-  return seq.clips.length === 1 && !c.image && c.volume === 1 && !seq.music && !seq.fadeIn && !seq.fadeOut
-    && !seq.normalize && !req.preview && req.preset === 'cut' && req.cut === 'fast';
+  const untouched = c.volume === 1 && c.rate === 1 && c.zoom === 1 && !c.look && !c.keepColor && !c.flash && !c.sounds.length;
+  return seq.clips.length === 1 && !c.image && untouched && !seq.music && !seq.fadeIn && !seq.fadeOut
+    && !seq.normalize && !seq.look && req.aspect === 'auto' && !req.preview && req.preset === 'cut' && req.cut === 'fast';
 }
+
+// The canvas shape as a width/height ratio, or null to follow the clips.
+const canvasRatio = (req) => ASPECTS[req.aspect] ?? (req.preset === 'tiktok' ? ASPECTS['9:16'] : null);
 
 // The "reference" the resolution/fps/bitrate rules work against: the canvas follows the orientation
 // that is on screen longest (a vertical phone clip in a landscape trailer gets pillarboxed, not the
@@ -247,7 +413,9 @@ function referenceSource(seq) {
     width: ref.width, height: ref.height,
     fps: allVideos.length ? Math.max(...allVideos.map((c) => c.source.fps || 30)) : 30,
     bitrate,
-    hasAudio: seq.clips.some((c) => c.audible) || Boolean(seq.music),
+    hasAudio: seq.clips.some((c) => c.audible || c.sounds.length) || Boolean(seq.music),
+    // For a fixed canvas shape: the sharpest short side among the videos (or the images when there are none).
+    short: Math.max(...(allVideos.length ? allVideos : seq.clips).map((c) => Math.min(c.source.width, c.source.height))),
   };
 }
 
@@ -264,7 +432,7 @@ export function planExport(sources, input, { encoders = ['libx264'], transitions
     : PRESET_MB[req.preset] ? PRESET_MB[req.preset] * 1e6 : null;
   const mode = !targetBytes && copyEligible(req, seq) ? 'copy' : 'encode';
   const muted = req.audio === 'mute' || !ref.hasAudio;
-  const warnings = [];
+  const warnings = [...seq.notes];
 
   const plan = {
     mode, twoPass: false, encoder: null, videoKbps: null, crf: null,
@@ -272,6 +440,7 @@ export function planExport(sources, input, { encoders = ['libx264'], transitions
     width: ref.width, height: ref.height, fps: ref.fps,
     duration, clips: seq.clips.length, transitions: seq.transitions.filter((t) => t.type !== 'cut').length,
     music: Boolean(seq.music), preview: req.preview,
+    aspect: req.aspect !== 'auto' ? req.aspect : req.preset === 'tiktok' ? '9:16' : 'auto',
     targetBytes, estimatedBytes: null, outputPath: null, warnings, summary: '',
   };
 
@@ -311,26 +480,30 @@ export function planExport(sources, input, { encoders = ['libx264'], transitions
       plan.crf = 28;
       plan.audioKbps = muted ? 0 : 96;
     } else {
-      plan.crf = req.preset === 'steam' ? 18 : 20;
-      plan.audioKbps = muted ? 0 : req.preset === 'steam' ? 192 : 160;
+      plan.crf = HQ_PRESETS.has(req.preset) ? 18 : 20;
+      plan.audioKbps = muted ? 0 : HQ_PRESETS.has(req.preset) ? 192 : 160;
     }
 
-    // Resolution / fps. Heights are clamped to the reference (never upscale) and even.
-    const srcW = ref.width, srcH = ref.height;
-    const dimsFor = (h) => {
-      h = Math.min(h, srcH) & ~1;
-      return { width: Math.round((srcW * h) / srcH / 2) * 2, height: h };
+    // Resolution / fps. Sizes are clamped to the reference (never upscale) and even. `size` is the height,
+    // or, for a fixed canvas shape (aspect / tiktok), the short side: 1080 in 9:16 is 1080x1920.
+    const ratio = canvasRatio(req);
+    const even = (n) => Math.max(2, Math.round(n / 2) * 2);
+    const limit = ratio ? ref.short : ref.height;
+    const dimsFor = (size) => {
+      size = Math.min(size, limit) & ~1;
+      if (!ratio) return { width: even((ref.width * size) / ref.height), height: size };
+      return ratio >= 1 ? { width: even(size * ratio), height: size } : { width: size, height: even(size / ratio) };
     };
     const bpp = (d, fps) => (plan.videoKbps * 1000) / (d.width * d.height * fps);
-    const steamAuto = req.preset === 'steam' && req.resolution === 'auto';
+    const hqAuto = HQ_PRESETS.has(req.preset) && req.resolution === 'auto';
     let fps = req.fps === 'auto' || req.fps === 'source' ? ref.fps : Math.min(req.fps, ref.fps);
-    if (req.preset === 'steam' && req.fps === 'auto') fps = Math.min(fps, 60);
+    if (HQ_PRESETS.has(req.preset) && req.fps === 'auto') fps = Math.min(fps, 60);
 
     let height;
     if (typeof req.resolution === 'number') height = req.resolution;
-    else if (req.resolution === 'source' || !targetBytes || capped) height = steamAuto ? Math.min(srcH, 1080) : srcH;
+    else if (req.resolution === 'source' || !targetBytes || capped) height = hqAuto ? Math.min(limit, 1080) : limit;
     else {
-      const candidates = [...new Set([srcH, 1080, 720, 480, 360].filter((h) => h <= srcH))].sort((a, b) => b - a);
+      const candidates = [...new Set([limit, 1080, 720, 480, 360].filter((h) => h <= limit))].sort((a, b) => b - a);
       height = candidates.find((h) => bpp(dimsFor(h), fps) >= 0.05) ?? candidates.at(-1);
     }
     if (req.preview) { height = Math.min(height, PREVIEW_HEIGHT); fps = Math.min(fps, 60); }
@@ -367,11 +540,12 @@ export function planExport(sources, input, { encoders = ['libx264'], transitions
     const p = path.resolve(req.outputPath);
     for (const c of seq.clips) if (p === path.resolve(c.source.path)) fail('Output path must differ from the source file');
     if (seq.music && p === path.resolve(seq.music.source.path)) fail('Output path must differ from the music file');
+    for (const c of seq.clips) for (const s of c.sounds) if (p === path.resolve(s.source.path)) fail('Output path must differ from the sound files');
     dir = path.dirname(p);
     ext = path.extname(p) || ext;
     base = path.basename(p, path.extname(p));
   } else {
-    const tag = targetBytes ? `${targetBytes / 1e6}MB` : req.preset === 'steam' ? 'steam' : 'cut';
+    const tag = targetBytes ? `${targetBytes / 1e6}MB` : HQ_PRESETS.has(req.preset) ? req.preset : 'cut';
     // Files the app keeps itself (uploads in the temp dir, title cards under the output dir) are no place for exports.
     const own = first.uploaded || path.resolve(first.path).startsWith(path.resolve(defaultOutputDir) + path.sep);
     dir = own ? defaultOutputDir : path.dirname(first.path);
@@ -385,17 +559,102 @@ export function planExport(sources, input, { encoders = ['libx264'], transitions
 }
 
 // Scale a clip into the W×H canvas: same aspect → plain scale, otherwise letterbox/pillarbox.
-function fitFilters(src, W, H) {
+// `pad: false` leaves the letterboxed picture at its own size (the blur fill lays it over a background).
+function fitFilters(src, W, H, { pad = true } = {}) {
   if (src.width === W && src.height === H) return [];
   const same = Math.abs(src.width / src.height - W / H) < 0.01;
   if (same) return [`scale=${W}:${H}:flags=bicubic`];
-  return [`scale=${W}:${H}:force_original_aspect_ratio=decrease:flags=bicubic`, `pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2`];
+  const scale = `scale=${W}:${H}:force_original_aspect_ratio=decrease:flags=bicubic`;
+  return pad ? [scale, `pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2`] : [scale];
+}
+
+const evenFloor = (n) => Math.max(2, Math.floor(n / 2) * 2);
+
+// A value that moves through keyframes [{ t, v }] (clip time), linearly, held before the first and after the last.
+function keyframed(keys) {
+  let expr = f3(keys.at(-1).v);
+  for (let i = keys.length - 2; i >= 0; i--) {
+    const a = keys[i], b = keys[i + 1];
+    if (b.t - a.t < 1e-3) continue;
+    expr = `if(lt(t,${f6(b.t)}),${f3(a.v)}+${f6(b.v - a.v)}*(t-${f6(a.t)})/${f6(b.t - a.t)},${expr})`;
+  }
+  return `if(lt(t,${f6(keys[0].t)}),${f3(keys[0].v)},${expr})`;
+}
+
+// The part of the source a clip shows: for "fill" the canvas shape (cropping the sides of a landscape clip
+// in a 9:16 video), otherwise the source shape; zoom shrinks it, pan moves it. Returns its size and the
+// crop filter (null when the whole frame is used).
+function framing(c, W, H) {
+  const { width: sw, height: sh } = c.source;
+  const ratio = c.fit === 'fill' ? W / H : sw / sh;
+  let rw = sw, rh = sh;
+  if (sw / sh > ratio) rw = sh * ratio; else rh = sw / ratio;
+  rw = Math.min(sw, evenFloor(rw / c.zoom));
+  rh = Math.min(sh, evenFloor(rh / c.zoom));
+  if (rw >= sw - 1 && rh >= sh - 1) return { region: { width: sw, height: sh }, crop: null };
+  const room = { x: sw - rw, y: sh - rh };
+  const keys = c.pan.length ? c.pan : [{ t: 0, x: 0.5, y: 0.5 }];
+  const axis = (k) => {
+    const values = keys.map((p) => ({ t: p.t, v: Math.round(p[k] * room[k]) }));
+    return values.every((p) => p.v === values[0].v) ? String(values[0].v) : `'floor(${keyframed(values)})'`;
+  };
+  return { region: { width: rw, height: rh }, crop: `crop=w=${rw}:h=${rh}:x=${axis('x')}:y=${axis('y')}` };
+}
+
+// Colour grade → filters (the order matters: grade, then the selective colour, motion blur and flash).
+function lookFilters(look) {
+  if (!look) return [];
+  const out = [];
+  const { brightness: b, contrast: c, saturation: s, gamma: g } = look;
+  if (b || c !== 1 || s !== 1 || g !== 1) out.push(`eq=brightness=${f3(b)}:contrast=${f3(c)}:saturation=${f3(s)}:gamma=${f3(g)}`);
+  if (look.hue) out.push(`hue=h=${f3(look.hue)}`);
+  if (look.tint) {
+    // Push shadows, midtones and highlights towards the tint colour, keeping the lightness.
+    const rgb = [1, 3, 5].map((i) => parseInt(look.tint.color.slice(i, i + 2), 16) / 255);
+    const mean = (rgb[0] + rgb[1] + rgb[2]) / 3;
+    const shift = (k, scale) => f3(Math.max(-1, Math.min(1, (rgb[k] - mean) * look.tint.amount * scale)));
+    const ranges = [['s', 0.5], ['m', 1], ['h', 0.6]];
+    out.push(`colorbalance=${ranges.flatMap(([r, scale]) => ['r', 'g', 'b'].map((ch, k) => `${ch}${r}=${shift(k, scale)}`)).join(':')}:pl=1`);
+  }
+  if (look.sharpen) out.push(`unsharp=5:5:${f3(look.sharpen)}:5:5:0`);
+  return out;
+}
+
+function effectFilters(c, globalLook) {
+  const out = [...lookFilters(c.look), ...lookFilters(globalLook)];
+  const k = c.keepColor;
+  if (k) {
+    const when = k.from != null && k.until != null ? `between(t,${f6(k.from)},${f6(k.until)})`
+      : k.until != null ? `lt(t,${f6(k.until)})` : k.from != null ? `gte(t,${f6(k.from)})` : null;
+    out.push(`colorhold=color=0x${k.color.slice(1)}:similarity=${f3(k.range)}:blend=${f3(k.softness)}${when ? `:enable='${when}'` : ''}`);
+  }
+  const blur = Math.max(c.look?.motionBlur || 0, globalLook?.motionBlur || 0);
+  if (blur > 0) out.push(`tmix=frames=${1 + Math.max(1, Math.round(blur * 4))}`);
+  if (c.flash > 0) {
+    // A white flash that fades out over FLASH_SECONDS; a weaker flash starts part-way into a longer fade.
+    const d = FLASH_SECONDS / c.flash;
+    const st = Math.max(0, c.hitAt - (1 - c.flash) * d);
+    out.push(`fade=t=in:st=${f6(st)}:d=${f6(d)}:color=white:enable='gte(t,${f6(c.hitAt)})'`);
+  }
+  return out;
+}
+
+// atempo only takes 0.5..2 per instance on older ffmpeg; chain it for anything beyond.
+function tempoFilters(rate) {
+  if (rate === 1) return [];
+  const out = [];
+  let s = rate;
+  while (s > 2 + EPS) { out.push('atempo=2'); s /= 2; }
+  while (s < 0.5 - EPS) { out.push('atempo=0.5'); s /= 0.5; }
+  out.push(`atempo=${f6(s)}`);
+  return out;
 }
 
 const AFORMAT = `aresample=${AUDIO_RATE}:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo`;
 
 // filter_complex for the sequence. `withAudio=false` builds the video-only graph for two-pass pass 1.
 // Returns { graph, video, audio, duration }: the graph, its output labels and its exact length in seconds.
+// Inputs: one per clip, then the music (when there is one), then every clip sound in clip order.
 export function buildFilterGraph(plan, seq, { withAudio = true } = {}) {
   const { width: W, height: H, fps: F } = plan;
   const tl = timeline(seq, F);
@@ -410,18 +669,33 @@ export function buildFilterGraph(plan, seq, { withAudio = true } = {}) {
 
   seq.clips.forEach((c, k) => {
     const n = tl.frames[k];
+    const pre = [c.rate !== 1 ? `setpts=(PTS-STARTPTS)/${f6(c.rate)}` : 'setpts=PTS-STARTPTS', `fps=${f3(F)}`];
+    const { region, crop } = framing(c, W, H);
+    if (crop) pre.push(crop);
+    // Effects run on the cropped picture, before it is scaled or padded: cheaper when it is smaller than
+    // the canvas, and the bars of a letterboxed clip stay black.
+    pre.push(...effectFilters(c, seq.look));
     // settb: concat hands on a 1/1000000 timebase and xfade refuses inputs whose timebases differ,
     // so a cut followed by a transition only works when every clip is on that timebase from the start.
-    const video = ['setpts=PTS-STARTPTS', `fps=${f3(F)}`, ...fitFilters(c.source, W, H), 'setsar=1', 'format=yuv420p',
-      'tpad=stop=-1:stop_mode=clone', `trim=end_frame=${n}`, 'settb=AVTB'];
-    parts.push(`[${k}:v]${video.join(',')}[v${k}]`);
+    const post = ['setsar=1', 'format=yuv420p', 'tpad=stop=-1:stop_mode=clone', `trim=end_frame=${n}`, 'settb=AVTB'];
+    const fits = Math.abs(region.width / region.height - W / H) < 0.01;
+    if (c.fit === 'blur' && !fits) {
+      // The picture letterboxed over a blurred, darkened copy of itself that fills the canvas.
+      const bw = evenFloor(W / 8), bh = evenFloor(H / 8);
+      parts.push(`[${k}:v]${pre.join(',')},split=2[bg${k}][fg${k}]`);
+      parts.push(`[bg${k}]scale=${bw}:${bh}:force_original_aspect_ratio=increase,crop=${bw}:${bh},gblur=sigma=6,eq=brightness=-0.06,scale=${W}:${H},setsar=1[bb${k}]`);
+      parts.push(`[fg${k}]${fitFilters(region, W, H, { pad: false }).join(',') || 'null'},setsar=1[ff${k}]`);
+      parts.push(`[bb${k}][ff${k}]overlay=(W-w)/2:(H-h)/2,${post.join(',')}[v${k}]`);
+    } else {
+      parts.push(`[${k}:v]${[...pre, ...fitFilters(region, W, H), ...post].join(',')}[v${k}]`);
+    }
     vLabels.push(`[v${k}]`);
     if (!clipAudio) return;
     const len = samples(n);
     if (c.audible) {
       const vol = c.volume !== 1 ? [`volume=${f3(c.volume)}`] : [];
       // 5 ms edge fades remove clicks at hard cuts without changing the clip length.
-      const audio = ['asetpts=PTS-STARTPTS', AFORMAT, ...vol, `apad=whole_len=${len}`, `atrim=end_sample=${len}`, 'afade=t=in:d=0.005', `afade=t=out:st=${f6(Math.max(0, n / F - 0.005))}:d=0.005`];
+      const audio = ['asetpts=PTS-STARTPTS', AFORMAT, ...tempoFilters(c.rate), ...vol, `apad=whole_len=${len}`, `atrim=end_sample=${len}`, 'afade=t=in:d=0.005', `afade=t=out:st=${f6(Math.max(0, n / F - 0.005))}:d=0.005`];
       parts.push(`[${k}:a]${audio.join(',')}[a${k}]`);
     } else {
       parts.push(`anullsrc=r=${AUDIO_RATE}:cl=stereo,atrim=end_sample=${len}[a${k}]`);
@@ -430,9 +704,12 @@ export function buildFilterGraph(plan, seq, { withAudio = true } = {}) {
   });
 
   // Chain the clips: a cut is a concat, anything else an xfade/acrossfade at the running offset.
+  // `starts` collects where each clip begins on the output timeline (in frames), for the clip sounds.
   let v = vLabels[0], a = aLabels[0], acc = tl.frames[0];
+  const starts = [0];
   seq.transitions.forEach((t, i) => {
     const k = i + 1, o = tl.overlap[i];
+    starts.push(acc - o);
     if (!o) {
       parts.push(`${v}${vLabels[k]}concat=n=2:v=1:a=0[x${k}]`);
       if (clipAudio) parts.push(`${a}${aLabels[k]}concat=n=2:v=0:a=1[y${k}]`);
@@ -451,16 +728,29 @@ export function buildFilterGraph(plan, seq, { withAudio = true } = {}) {
   if (vTail.length) { parts.push(`${v}${vTail.join(',')}[vout]`); v = '[vout]'; }
   if (!withAudio) return { graph: parts.join(';'), video: v, audio: null, duration: T };
 
+  const M = seq.clips.length;
+  const extra = []; // music (mixed) and clip sounds, laid over the base track
   if (seq.music) {
-    const m = seq.music, M = seq.clips.length;
+    const m = seq.music;
     const chain = ['asetpts=PTS-STARTPTS', AFORMAT];
     if (m.volume !== 1) chain.push(`volume=${f3(m.volume)}`);
     if (m.fadeIn > 0) chain.push(`afade=t=in:d=${f3(m.fadeIn)}`);
     if (m.fadeOut > 0) chain.push(`afade=t=out:st=${fadeOutAt(m.fadeOut)}:d=${f3(m.fadeOut)}`);
     chain.push(`apad=whole_len=${samples(tl.total)}`, `atrim=end_sample=${samples(tl.total)}`);
     parts.push(`[${M}:a]${chain.join(',')}[m]`);
-    if (m.mode === 'replace') a = '[m]';
-    else { parts.push(`${a}[m]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[mix]`); a = '[mix]'; }
+    if (m.mode === 'replace') a = '[m]'; else extra.push('[m]');
+  }
+  let input = M + (seq.music ? 1 : 0);
+  seq.clips.forEach((c, k) => c.sounds.forEach((s) => {
+    const label = `[s${input}]`;
+    const delay = Math.max(0, Math.round((starts[k] / F + s.at) * 1000));
+    const chain = ['asetpts=PTS-STARTPTS', AFORMAT, ...(s.volume !== 1 ? [`volume=${f3(s.volume)}`] : []), `adelay=delays=${delay}:all=1`, `atrim=end_sample=${samples(tl.total)}`];
+    parts.push(`[${input++}:a]${chain.join(',')}${label}`);
+    extra.push(label);
+  }));
+  if (extra.length) {
+    parts.push(`${a}${extra.join('')}amix=inputs=${extra.length + 1}:duration=first:dropout_transition=0:normalize=0[mix]`);
+    a = '[mix]';
   }
   const aTail = [];
   if (seq.fadeIn > 0) aTail.push(`afade=t=in:d=${f3(seq.fadeIn)}`);
@@ -489,15 +779,17 @@ export function buildArgs(plan, sources, input, { passLogFile, nullDevice, trans
 
   const inputs = [];
   for (const c of seq.clips) {
-    if (c.image) inputs.push('-loop', '1', '-framerate', f3(plan.fps), '-t', f3(c.duration), '-i', c.source.path);
-    else inputs.push('-ss', f3(c.start), '-t', f3(c.duration), '-i', c.source.path);
+    if (c.image) inputs.push('-loop', '1', '-framerate', f3(plan.fps), '-t', f3(c.srcDuration), '-i', c.source.path);
+    else inputs.push('-ss', f3(c.start), '-t', f3(c.srcDuration), '-i', c.source.path);
   }
+  // Music and clip sounds: the audio-only inputs after the clips (see buildFilterGraph for the order).
   const musicInput = [];
   if (seq.music && plan.audioKbps) {
     if (seq.music.loop) musicInput.push('-stream_loop', '-1');
     if (seq.music.start > 0) musicInput.push('-ss', f3(seq.music.start));
     musicInput.push('-i', seq.music.source.path);
   }
+  if (plan.audioKbps) for (const c of seq.clips) for (const s of c.sounds) musicInput.push('-i', s.source.path);
   const withAudio = plan.audioKbps > 0;
   const full = buildFilterGraph(plan, seq, { withAudio });
   const mapsFor = (g, useAudio) => ['-filter_complex', g.graph, '-map', g.video, ...(useAudio && g.audio ? ['-map', g.audio] : [])];

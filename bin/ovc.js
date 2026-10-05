@@ -9,6 +9,9 @@ import { createServer, DEFAULT_OUTPUT_DIR, VERSION } from '../src/server.js';
 import { Jobs, isTerminal } from '../src/jobs.js';
 import { planExport } from '../src/plan.js';
 import { resolveProject, projectRequest } from '../src/project.js';
+import { beats as analyseBeats, highlights as analyseHighlights } from '../src/analysis.js';
+import { arrangeMontage, beatGrid, normalizeMontage } from '../src/montage.js';
+import { LOOKS, MONTAGE_STYLE } from '../public/js/looks.js';
 
 const HELP = `OpenVideoChamp ${VERSION} - video cutting, trailers and size-targeted compression
 
@@ -16,6 +19,12 @@ Usage:
   ovc [file] [--port 4455] [--no-open]      start the local server and open the UI (file: a video or a project)
   ovc cut <file> [options]                  export one clip without the UI
   ovc render <project.ovc.json> [options]   render a project saved by the UI (clips, transitions, music, ...)
+  ovc montage <clips or folders...> [options]
+                                            auto-edit a vertical highlight montage: finds the goal in every
+                                            clip, trims around it, cuts on the beats of --music, writes a
+                                            project you can open and tweak in the UI (--render exports it too)
+  ovc beats <music file>                    print the tempo and beat times (JSON)
+  ovc hits <video>                          print the detected highlight moments (JSON)
 
 Cut options:
   --from <t> --to <t>      range; seconds or mm:ss(.ms) / hh:mm:ss(.ms)   (default: whole file)
@@ -23,7 +32,7 @@ Cut options:
 
 Cut and render options:
   --size <MB>              target size, e.g. 10MB or 2.5     (custom preset)
-  --preset <name>          discord | discord50 | discord500 | steam | cut  (cut: default, render: from the project)
+  --preset <name>          discord | discord50 | discord500 | steam | tiktok | cut  (cut: default, render: from the project)
   --out <path>             output file (default: next to the source, never overwrites)
   --res <height>           1080 | 720 | 480 | 360 | source | auto
   --fps <n>                60 | 30 | source | auto
@@ -31,9 +40,22 @@ Cut and render options:
   --speed <s>              fast | balanced | best  (x264 preset veryfast | medium | slow)
   --encoder <name>         libx264 (default) or a verified hardware encoder (h264_nvenc, h264_qsv, ...)
 
+Montage options:
+  --music <file>           the track to cut to (its beats set the rhythm)
+  --music-start <t>        start that far into the track
+  --setup <s[,s]>          seconds before each goal: first clip, last clip   (default 5,2.5)
+  --hold <s>               seconds after each goal                             (default 0.8)
+  --sync <beat|bar|off>    land goals on beats, on bars, or not at all          (default beat)
+  --look <name>            ${Object.keys(LOOKS).join(' | ')}   (default punchy)
+  --aspect <a>             9:16 | 16:9 | 1:1 | 4:5 | auto   (default 9:16)
+  --fit <f>                fill | blur | fit                 (default fill)
+  --project <path>         where to write the project       (default montage.ovc.json next to the first clip)
+  --render                 also export it (preset tiktok unless --preset / --size say otherwise)
+
 Environment: OVC_PORT, OVC_FFMPEG, OVC_FFPROBE, OVC_OUTPUT_DIR (default ~/Videos/OpenVideoChamp).
 `;
-const FLAGS = new Set(['no-open', 'mute', 'precise', 'help', 'h', 'version']);
+const FLAGS = new Set(['no-open', 'mute', 'precise', 'help', 'h', 'version', 'render']);
+const VIDEO_EXT = /\.(mp4|mkv|mov|webm|avi|m4v|ts|mts|wmv|flv|mpg|mpeg)$/i;
 
 function parseArgv(argv) {
   const opts = {}, positional = [];
@@ -202,12 +224,113 @@ async function render(positional, opts) {
   await finish(ffmpeg, plan, getSource, request);
 }
 
+// A free file name: "name.ext", then "name-2.ext", ...
+function freeFile(file) {
+  const ext = path.extname(file), stem = file.slice(0, -ext.length || undefined);
+  let out = file;
+  for (let n = 2; fs.existsSync(out); n++) out = `${stem}-${n}${ext}`;
+  return out;
+}
+
+async function openSource(ffprobe, file, id) {
+  return { id, name: path.basename(file), path: file, uploaded: false, ...(await probe(ffprobe, file)) };
+}
+
+async function montage(positional, opts) {
+  if (!positional.length) die('Usage: ovc montage <clips or folders...> --music <file> [options]');
+  const files = [];
+  for (const arg of positional) {
+    const abs = path.resolve(arg);
+    if (!fs.existsSync(abs)) die(`Not found: ${abs}`);
+    if (fs.statSync(abs).isDirectory()) {
+      files.push(...fs.readdirSync(abs).filter((f) => VIDEO_EXT.test(f)).sort((a, b) => a.localeCompare(b, undefined, { numeric: true })).map((f) => path.join(abs, f)));
+    } else files.push(abs);
+  }
+  if (!files.length) die('No video files found');
+  let options;
+  try {
+    options = normalizeMontage({
+      ...MONTAGE_STYLE.montage,
+      ...(opts.setup != null ? { setup: String(opts.setup).split(',').map(Number) } : {}),
+      ...(opts.hold != null ? { hold: Number(opts.hold) } : {}),
+      ...(opts.sync != null ? { sync: opts.sync } : {}),
+    });
+  } catch (e) { die(e.message); }
+  const lookKey = opts.look ?? 'punchy';
+  if (!LOOKS[lookKey]) die(`Unknown look: ${lookKey} (${Object.keys(LOOKS).join(', ')})`);
+  const { ffmpeg, ffprobe } = locate();
+
+  const sources = [], clips = [];
+  for (const [i, file] of files.entries()) {
+    const src = await openSource(ffprobe, file, `s_${i + 1}`);
+    if (src.kind !== 'video') { console.error(`skipped ${src.name}: not a video`); continue; }
+    process.stderr.write(`\rfinding the highlight in ${i + 1}/${files.length}: ${src.name}    `);
+    const h = await analyseHighlights(ffmpeg, src);
+    sources.push(src);
+    clips.push({ sourceId: src.id, start: 0, end: src.duration, volume: MONTAGE_STYLE.clipVolume, hit: h.hits[0]?.t ?? null, duration: src.duration });
+  }
+  process.stderr.write('\n');
+  if (!clips.length) die('None of the files is a video');
+
+  let music = null, grid = null;
+  if (opts.music) {
+    const file = path.resolve(opts.music);
+    if (!fs.existsSync(file)) die(`Not found: ${file}`);
+    const src = await openSource(ffprobe, file, 's_music');
+    if (!src.hasAudio) die(`${src.name} has no audio`);
+    sources.push(src);
+    music = { sourceId: src.id, start: opts['music-start'] != null ? parseTime(opts['music-start']) : 0, ...MONTAGE_STYLE.music };
+    if (options.sync !== 'off') {
+      process.stderr.write(`finding the beats of ${src.name}…\n`);
+      const b = await analyseBeats(ffmpeg, src);
+      if (b.bpm) console.error(`${b.bpm} BPM, ${b.beats.length} beats`);
+      grid = beatGrid(b, { start: music.start, loop: music.loop, until: clips.reduce((s, c) => s + c.duration, 0) + 60 });
+    }
+  }
+  const arranged = arrangeMontage(clips, options, grid);
+  for (const n of arranged.notes) console.error(`note: ${n}`);
+
+  const project = {
+    app: 'OpenVideoChamp', version: 1, name: 'montage',
+    sources: sources.map(({ id, path: p, name, kind }) => ({ id, path: p, name, kind })),
+    clips: arranged.clips.map(({ duration, ...c }) => c),
+    transitions: arranged.clips.slice(1).map(() => ({ type: 'cut', duration: 0 })),
+    fadeIn: 0, fadeOut: MONTAGE_STYLE.fadeOut, normalize: Boolean(music),
+    aspect: opts.aspect ?? MONTAGE_STYLE.aspect, fit: opts.fit ?? MONTAGE_STYLE.fit, look: LOOKS[lookKey].look,
+    music,
+    output: { preset: MONTAGE_STYLE.preset, resolution: 'auto', fps: 'auto', audio: 'keep', speed: 'balanced', encoder: 'auto' },
+  };
+  const projectFile = opts.project ? path.resolve(opts.project) : freeFile(path.join(path.dirname(files[0]), 'montage.ovc.json'));
+  fs.writeFileSync(projectFile, JSON.stringify(project, null, 2));
+  const total = arranged.timeline.at(-1)?.end ?? 0;
+  console.error(`${clips.length} clips, ${total.toFixed(1)} s${grid ? `, cut to the ${options.sync === 'bar' ? 'bars' : 'beats'}` : ''}: ${projectFile}`);
+  console.log(projectFile);
+  if (opts.render) await render([projectFile], opts);
+}
+
+async function analyse(kind, positional) {
+  const file = positional[0] && path.resolve(positional[0]);
+  if (!file || !fs.existsSync(file)) die(`Usage: ovc ${kind} <file>`);
+  const { ffmpeg, ffprobe } = locate();
+  const src = await openSource(ffprobe, file, 's_cli');
+  if (kind === 'beats') {
+    if (!src.hasAudio) die(`${src.name} has no audio`);
+    console.log(JSON.stringify(await analyseBeats(ffmpeg, src)));
+  } else {
+    if (src.kind !== 'video') die(`${src.name} is not a video`);
+    const { hits, step } = await analyseHighlights(ffmpeg, src);
+    console.log(JSON.stringify({ hits, step }));
+  }
+}
+
 const { opts, positional } = parseArgv(process.argv.slice(2));
 try {
   if (opts.help || opts.h) console.log(HELP);
   else if (opts.version) console.log(VERSION);
   else if (positional[0] === 'cut') await cut(positional.slice(1), opts);
   else if (positional[0] === 'render') await render(positional.slice(1), opts);
+  else if (positional[0] === 'montage') await montage(positional.slice(1), opts);
+  else if (positional[0] === 'beats' || positional[0] === 'hits') await analyse(positional[0], positional.slice(1));
   else serve(positional, opts);
 } catch (err) {
   die(err.message);

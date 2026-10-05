@@ -28,7 +28,15 @@ export async function resolveProject(data, { baseDir = process.cwd(), open }) {
   data.clips.forEach((c, i) => {
     const src = c && typeof c === 'object' ? byId.get(c.sourceId) : null;
     if (!src || src.kind === 'audio') { dropped++; return; }
-    clips.push({ ...c, sourceId: src.id });
+    const clip = { ...c, sourceId: src.id };
+    // Clip sounds point at sources too; one whose file is gone is left out.
+    if (Array.isArray(c.sounds)) {
+      clip.sounds = c.sounds.flatMap((snd) => {
+        const s = snd && typeof snd === 'object' ? byId.get(snd.sourceId) : null;
+        return s?.hasAudio ? [{ ...snd, sourceId: s.id }] : [];
+      });
+    }
+    clips.push(clip);
     if (clips.length > 1) transitions.push(data.transitions?.[i - 1] ?? { type: 'cut', duration: 0 });
   });
   const musicSource = data.music && typeof data.music === 'object' ? byId.get(data.music.sourceId) : null;
@@ -39,6 +47,9 @@ export async function resolveProject(data, { baseDir = process.cwd(), open }) {
     sources: [...byPath.values()],
     clips, transitions,
     fadeIn: Number(data.fadeIn) || 0, fadeOut: Number(data.fadeOut) || 0, normalize: Boolean(data.normalize),
+    aspect: typeof data.aspect === 'string' ? data.aspect : 'auto',
+    fit: typeof data.fit === 'string' ? data.fit : 'fit',
+    look: data.look && typeof data.look === 'object' ? data.look : null,
     music: musicSource?.hasAudio ? { ...data.music, sourceId: musicSource.id } : null,
     output, missing, dropped,
   };
@@ -46,6 +57,6 @@ export async function resolveProject(data, { baseDir = process.cwd(), open }) {
 
 // The ExportRequest a resolved project describes; `overrides` win over the project's output options.
 export function projectRequest(project, overrides = {}) {
-  const { clips, transitions, fadeIn, fadeOut, music, normalize, output } = project;
-  return { clips, transitions, fadeIn, fadeOut, music, normalize, ...output, ...overrides };
+  const { clips, transitions, fadeIn, fadeOut, music, normalize, aspect, fit, look, output } = project;
+  return { clips, transitions, fadeIn, fadeOut, music, normalize, aspect, fit, look, ...output, ...overrides };
 }
