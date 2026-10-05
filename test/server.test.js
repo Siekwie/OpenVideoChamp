@@ -509,6 +509,25 @@ test('montage: beats of a track, the hit of a gameplay clip, an auto-edit cut to
   }
   assert.ok(m.data.timeline[0].hit - m.data.timeline[0].start > m.data.timeline[1].hit - m.data.timeline[1].start);
   assert.equal((await api('POST', '/api/montage', { clips: [] })).status, 400);
+
+  // style: the answer is a complete ExportRequest in the vertical montage style, ready for /api/export
+  const info = (await api('GET', '/api/info')).data;
+  assert.deepEqual(info.looks.punchy, { contrast: 1.12, saturation: 1.35, sharpen: 0.35 });
+  assert.equal(info.looks.none, null);
+  const styled = await api('POST', '/api/montage', { clips: [{ sourceId: goal.id }, { sourceId: goal.id, volume: 0.3 }, { sourceId: cardId, end: 1 }], music: { sourceId: beat.id, start: 0.25 }, style: true });
+  assert.equal(styled.status, 200, JSON.stringify(styled.data));
+  assert.equal(styled.data.aspect, '9:16');
+  assert.equal(styled.data.fit, 'fill');
+  assert.equal(styled.data.preset, 'tiktok');
+  assert.deepEqual(styled.data.look, info.looks.punchy);
+  assert.deepEqual(styled.data.clips.map((c) => c.volume), [0.6, 0.3, undefined]); // game audio under the music; stills untouched
+  assert.deepEqual({ ...styled.data.music }, { sourceId: beat.id, start: 0.25, volume: 0.9, fadeIn: 0, fadeOut: 1.5, loop: true, mode: 'mix' });
+  assert.equal(styled.data.normalize, true);
+  const styledPlan = await api('POST', '/api/plan', styled.data);
+  assert.equal(styledPlan.status, 200, JSON.stringify(styledPlan.data));
+  assert.equal(styledPlan.data.aspect, '9:16');
+  assert.ok(styledPlan.data.height > styledPlan.data.width);
+  assert.equal((await api('POST', '/api/plan', { ...styled.data, look: 'neon' })).status, 200);
   assert.equal((await api('POST', '/api/montage', { clips: [{ sourceId: goal.id }], sync: 'nope' })).status, 400);
 
   // the montage as a vertical draft with framing, a pan, a look, selective colour, a flash and a sound

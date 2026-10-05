@@ -6,6 +6,7 @@
 // a music track and loudness normalisation. The legacy single-clip request
 // (sourceId/start/end) is a one-clip sequence.
 import path from 'node:path';
+import { LOOKS } from '../public/js/looks.js';
 
 const PRESET_MB = { discord: 10, discord50: 50, discord500: 500 };
 // Presets without a size target that cap the canvas at 1080 (short side) and 60 fps, CRF 18.
@@ -102,7 +103,12 @@ function oneOf(value, allowed, name, fallback) {
 // A colour grade. Returns null when it changes nothing, so "no look" has a single representation.
 export function normalizeLook(input, name = 'look') {
   if (input == null || input === false) return null;
-  if (typeof input !== 'object') fail(`${name} must be an object`);
+  // A preset by name: "punchy", "neon", ... (GET /api/info lists them with their values).
+  if (typeof input === 'string') {
+    if (!Object.hasOwn(LOOKS, input)) fail(`Unknown ${name}: ${JSON.stringify(input)} (one of ${Object.keys(LOOKS).join(', ')})`);
+    return LOOKS[input].look ? normalizeLook(LOOKS[input].look, name) : null;
+  }
+  if (typeof input !== 'object') fail(`${name} must be an object or a look name`);
   let tint = null;
   if (input.tint != null && input.tint !== false) {
     const t = typeof input.tint === 'string' ? { color: input.tint } : input.tint;

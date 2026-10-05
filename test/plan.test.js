@@ -627,6 +627,13 @@ test('looks: per-clip and whole-video grades, tint, sharpen and motion blur on e
   const c0 = clipGraph(g, 0), c1 = clipGraph(g, 1);
   assert.match(c0, /crop=[^,]+,eq=brightness=0\.05:contrast=1:saturation=1:gamma=1,hue=h=-20,colorbalance=rs=0\.083:gs=-0\.167:bs=0\.083:rm=0\.167:gm=-0\.333:bm=0\.167:rh=0\.1:gh=-0\.2:bh=0\.1:pl=1,eq=brightness=0:contrast=1\.15:saturation=1\.4:gamma=1,unsharp=5:5:0\.5:5:5:0,tmix=frames=3,scale=1080:1920/);
   assert.match(c1, /crop=[^,]+,eq=brightness=0:contrast=1\.15:saturation=1\.4:gamma=1,unsharp=5:5:0\.5:5:5:0,tmix=frames=3,scale=1080:1920/);
+  // looks by name, as the UI's presets
+  const named = normalizeRequest(vert({ look: 'punchy', clips: [{ sourceId: 's_1', end: 2, look: 'neon' }] }));
+  assert.equal(named.look.saturation, 1.35);
+  assert.equal(named.look.contrast, 1.12);
+  assert.deepEqual(named.clips[0].look.tint, { color: '#ff3cc8', amount: 0.35 });
+  assert.equal(normalizeRequest(vert({ look: 'none' })).look, null);
+  assert.throws(() => normalizeRequest(vert({ look: 'sparkly' })), /Unknown look: "sparkly" \(one of none, punchy/);
   // a look that changes nothing is no look
   assert.equal(normalizeRequest(vert({ look: { contrast: 1, saturation: 1 } })).look, null);
   assert.throws(() => normalizeRequest(vert({ look: { saturation: 9 } })), /look saturation/);

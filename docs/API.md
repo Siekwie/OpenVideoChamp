@@ -29,12 +29,17 @@ A highlight montage (setup → trick → goal → hard cut, faster towards the e
 on the beat of a song), start to finish:
 
 1. `POST /api/open` for every gameplay clip and the song.
-2. `POST /api/montage` with `{ clips: [{ sourceId }, ...], music: { sourceId } }`
-   → every clip trimmed around its detected goal, the goals and cuts on beats.
-3. `POST /api/export` with those clips and transitions plus
-   `aspect: "9:16", fit: "fill", look: {...}, music: {...}, preset: "tiktok"`.
+2. `POST /api/montage` with `{ clips: [{ sourceId }, ...], music: { sourceId, start }, style: true }`
+   → every clip trimmed around its detected goal, the goals and cuts on beats,
+   and (with `style`) the whole vertical montage style: the answer is a
+   complete ExportRequest (9:16, filled frame, punchy look, hard cuts, game audio
+   under the music, preset `tiktok`).
+3. Optionally adjust it (reframe with `pan`, a `look` by name such as `"neon"`,
+   `keepColor` until the `hit`, a `flash`, `sounds`, `rate`), then
+   `POST /api/export` with it. To let the user fine-tune it in the UI instead,
+   write it as a project file and open `/?project=<path>`.
    (`ovc montage <clips> --music <song> --render` does all of this from the
-   command line and writes a project the UI can open.)
+   command line and writes such a project.)
 
 The UI keeps its own sequence in the browser, so what a script does through
 the API does not show up in an open UI window. To hand a sequence to the user,
@@ -95,7 +100,8 @@ Renders a title card with ffmpeg's `drawtext` and registers it:
 ```
 The PNG is written to `<defaultOutputDir>/title-cards/<title>.png` (never
 overwriting). Use the returned id as a clip: `{ "sourceId": "...", "end": 3 }`
-shows it for 3 s. 501 if this ffmpeg build has no `drawtext`. The text is sized
+shows it for 3 s. For a vertical (9:16) video make it `"width": 1080, "height": 1920`
+so it fills the frame. 501 if this ffmpeg build has no `drawtext`. The text is sized
 to fit the width by an estimate, so check very long titles.
 
 ### `POST /api/project`  body `{ "path": "trailer.ovc.json" }` or `{ "project": { ... } }`
@@ -200,7 +206,7 @@ anything changes to show the estimate line.
 
   "aspect": "auto",         // canvas shape: "auto" (follow the clips) | "16:9" | "9:16" | "1:1" | "4:5"
   "fit": "fit",             // how clips fill the canvas unless they say otherwise: "fit" | "fill" | "blur"
-  "look": null,             // colour grade of the whole video (every clip), see "Looks"
+  "look": null,             // colour grade of the whole video (every clip): an object or a preset name, see "Looks"
 
   "preset": "discord",      // "cut" | "discord" | "discord50" | "discord500" | "steam" | "tiktok" | "custom"
   "targetMB": 10,           // only for "custom" (decimal MB, 1 MB = 1,000,000 bytes)
@@ -234,7 +240,9 @@ degrees (0), `tint: { "color": "#rrggbb", "amount": 0..1 }` (pushes shadows,
 midtones and highlights towards the colour, keeping the lightness), `sharpen`
 0..2 (0), `motionBlur` 0..1 (0; blends 2..5 frames). Missing keys keep their
 default; a look that changes nothing is `null`. The clip's look is applied
-first, then the whole video's.
+first, then the whole video's. Instead of an object, a look can be the name of
+one of the UI's presets: `"none"`, `"punchy"`, `"vivid"`, `"neon"`, `"cool"`,
+`"warm"`, `"mono"` (`GET /api/info` lists them with their values).
 
 **Selective colour** (`keepColor`): everything except colours near `color`
 turns grey. `range` 0.01..1 is how near (0.3 keeps reds and oranges for an
@@ -319,7 +327,8 @@ a terminal status, then closes.
   "setup": [5, 2.5],      // seconds of build-up before the hit: first clip → last clip (or one number)
   "hold": 0.8,            // seconds after the hit before the cut
   "sync": "beat",         // "beat" (hits and cuts on beats) | "bar" (hits on downbeats, cuts on beats) | "off"
-  "detect": true          // find the hit of clips that have none (see highlights)
+  "detect": true,         // find the hit of clips that have none (see highlights)
+  "style": false          // true: also apply the vertical montage style (below)
 }
 ```
 Answer:
@@ -340,7 +349,15 @@ nearest that build-up and the cut to the beat nearest the hold; beats are
 counted from the music's `start`, repeated when it loops. Less footage than
 asked for shortens the build-up or hold (and may miss a beat: see `notes`).
 Stills and clips without a hit keep their range. A hit given outside the
-clip's range is looked for again inside it. The clips are meant to be joined
+clip's range is looked for again inside it.
+
+With `"style": true` the answer also carries `aspect: "9:16"`, `fit: "fill"`,
+`look` (the punchy preset), `music` (yours, with volume 0.9, fade-out 1.5 s,
+looped, mixed under the clips), `normalize: true` (with music), `fadeOut` (0.3 s
+unless the request had one) and `preset: "tiktok"`, and clips at full volume
+are turned down to 0.6 so the game sounds sit under the music: the whole answer
+can go straight to `/api/plan` and `/api/export` (extra fields such as
+`timeline` are ignored there). This is the UI's "Vertical montage style". The clips are meant to be joined
 with hard cuts; the planner keeps every cut within half a frame of the
 timeline, so a beat-synced montage stays on the beat.
 
@@ -354,7 +371,8 @@ timeline, so a beat-synced montage stays on the beat.
   "encoders": ["libx264", "h264_nvenc"],   // only encoders verified to actually work on this machine
   "transitions": ["fade", "wipeleft", "fadeblack", "..."],   // xfade transitions this ffmpeg supports
   "dialog": true,                          // native file dialog available
-  "defaultOutputDir": "C:\\Users\\me\\Videos\\OpenVideoChamp"
+  "defaultOutputDir": "C:\\Users\\me\\Videos\\OpenVideoChamp",
+  "looks": { "none": null, "punchy": { "contrast": 1.12, "saturation": 1.35, "sharpen": 0.35 }, "...": {} }   // look presets by name
 }
 ```
 ### `GET /api/docs`  — this document, as text/markdown (what the "copy agent instructions" button copies)

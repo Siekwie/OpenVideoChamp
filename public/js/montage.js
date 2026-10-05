@@ -2,7 +2,7 @@
 import { $ } from './util.js';
 import { api } from './api.js';
 import { state, edit, clipRequest, clipSource, isImage, setOutput, totalDuration } from './state.js';
-import { MONTAGE_STYLE } from './looks.js';
+import { MONTAGE_STYLE, montageStyled } from './looks.js';
 
 const el = {};
 for (const id of ['montageDialog', 'montageForm', 'mSetupA', 'mSetupB', 'mHold', 'mSync', 'mMusicNote', 'mStyle', 'mRedetect', 'mStatus', 'mCancel', 'mGo']) el[id] = $(id);
@@ -12,14 +12,8 @@ let busy = false;
 // 9:16, filled frame, punchy colours, hard cuts, the game audio under the music, exported for TikTok.
 // Called inside an edit() (or wraps itself in one).
 function styleSequence() {
-  state.aspect = MONTAGE_STYLE.aspect;
-  state.fit = MONTAGE_STYLE.fit;
-  state.look = structuredClone(MONTAGE_STYLE.look);
-  for (const t of state.transitions) { t.type = 'cut'; t.duration = 0; }
-  for (const c of state.clips) if (!isImage(c) && c.volume === 1) c.volume = MONTAGE_STYLE.clipVolume;
-  if (state.music) Object.assign(state.music, { ...MONTAGE_STYLE.music, start: state.music.start });
-  state.normalize = Boolean(state.music);
-  if (!state.fadeOut) state.fadeOut = MONTAGE_STYLE.fadeOut;
+  const s = montageStyled({ clips: state.clips, music: state.music, fadeOut: state.fadeOut, isImage });
+  Object.assign(state, { aspect: s.aspect, fit: s.fit, look: s.look, clips: s.clips, transitions: s.transitions, music: s.music, normalize: s.normalize, fadeOut: s.fadeOut });
 }
 
 export function applyMontageStyle() {

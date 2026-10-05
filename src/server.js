@@ -14,6 +14,7 @@ import { resolveProject } from './project.js';
 import { normalizeCard, renderTitleCard } from './titlecard.js';
 import { beats as analyseBeats, highlights as analyseHighlights, findHits } from './analysis.js';
 import { arrangeMontage, beatGrid, normalizeMontage } from './montage.js';
+import { LOOKS, montageStyled } from '../public/js/looks.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 export const VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version;
@@ -157,8 +158,11 @@ export function createServer({ ffmpeg, ffprobe, capabilities, tmpDir, publicDir 
       grid = beatGrid(b, { start: Number(body.music.start) || 0, loop: body.music.loop !== false, until });
     }
     const r = arrangeMontage(clips, options, grid);
+    // style: the answer becomes a complete ExportRequest in the vertical montage style.
+    const styled = body.style ? montageStyled({ clips: r.clips, music: body.music ?? null, fadeOut: Number(body.fadeOut) || 0, isImage: (c) => c.image }) : null;
     return {
-      clips: r.clips.map(({ image, duration, ...c }) => c),
+      ...styled,
+      clips: (styled?.clips ?? r.clips).map(({ image, duration, ...c }) => c),
       transitions: r.clips.slice(1).map(() => ({ type: 'cut', duration: 0 })),
       timeline: r.timeline, sync: r.sync, bpm, notes: r.notes,
     };
@@ -219,6 +223,7 @@ export function createServer({ ffmpeg, ffprobe, capabilities, tmpDir, publicDir 
         version: VERSION, platform: process.platform,
         ffmpeg: { path: ffmpeg, version: await versionPromise },
         encoders: caps.encoders, transitions: caps.transitions, dialog: dialogAvailable(), defaultOutputDir: outputDir,
+        looks: Object.fromEntries(Object.entries(LOOKS).map(([name, l]) => [name, l.look])),
       };
     }],
     ['GET', /^\/api\/docs$/, (req, res) => sendFile(res, path.join(ROOT, 'docs', 'API.md'), 'text/markdown; charset=utf-8')],

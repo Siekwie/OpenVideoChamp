@@ -11,7 +11,7 @@ import { planExport } from '../src/plan.js';
 import { resolveProject, projectRequest } from '../src/project.js';
 import { beats as analyseBeats, highlights as analyseHighlights } from '../src/analysis.js';
 import { arrangeMontage, beatGrid, normalizeMontage } from '../src/montage.js';
-import { LOOKS, MONTAGE_STYLE } from '../public/js/looks.js';
+import { LOOKS, MONTAGE_STYLE, montageStyled } from '../public/js/looks.js';
 
 const HELP = `OpenVideoChamp ${VERSION} - video cutting, trailers and size-targeted compression
 
@@ -267,7 +267,7 @@ async function montage(positional, opts) {
     process.stderr.write(`\rfinding the highlight in ${i + 1}/${files.length}: ${src.name}    `);
     const h = await analyseHighlights(ffmpeg, src);
     sources.push(src);
-    clips.push({ sourceId: src.id, start: 0, end: src.duration, volume: MONTAGE_STYLE.clipVolume, hit: h.hits[0]?.t ?? null, duration: src.duration });
+    clips.push({ sourceId: src.id, start: 0, end: src.duration, hit: h.hits[0]?.t ?? null, duration: src.duration });
   }
   process.stderr.write('\n');
   if (!clips.length) die('None of the files is a video');
@@ -279,7 +279,7 @@ async function montage(positional, opts) {
     const src = await openSource(ffprobe, file, 's_music');
     if (!src.hasAudio) die(`${src.name} has no audio`);
     sources.push(src);
-    music = { sourceId: src.id, start: opts['music-start'] != null ? parseTime(opts['music-start']) : 0, ...MONTAGE_STYLE.music };
+    music = { sourceId: src.id, start: opts['music-start'] != null ? parseTime(opts['music-start']) : 0, loop: MONTAGE_STYLE.music.loop };
     if (options.sync !== 'off') {
       process.stderr.write(`finding the beats of ${src.name}…\n`);
       const b = await analyseBeats(ffmpeg, src);
@@ -290,15 +290,15 @@ async function montage(positional, opts) {
   const arranged = arrangeMontage(clips, options, grid);
   for (const n of arranged.notes) console.error(`note: ${n}`);
 
+  const styled = montageStyled({ clips: arranged.clips.map(({ duration, ...c }) => c), music });
   const project = {
     app: 'OpenVideoChamp', version: 1, name: 'montage',
     sources: sources.map(({ id, path: p, name, kind }) => ({ id, path: p, name, kind })),
-    clips: arranged.clips.map(({ duration, ...c }) => c),
-    transitions: arranged.clips.slice(1).map(() => ({ type: 'cut', duration: 0 })),
-    fadeIn: 0, fadeOut: MONTAGE_STYLE.fadeOut, normalize: Boolean(music),
-    aspect: opts.aspect ?? MONTAGE_STYLE.aspect, fit: opts.fit ?? MONTAGE_STYLE.fit, look: LOOKS[lookKey].look,
-    music,
-    output: { preset: MONTAGE_STYLE.preset, resolution: 'auto', fps: 'auto', audio: 'keep', speed: 'balanced', encoder: 'auto' },
+    clips: styled.clips, transitions: styled.transitions,
+    fadeIn: 0, fadeOut: styled.fadeOut, normalize: styled.normalize,
+    aspect: opts.aspect ?? styled.aspect, fit: opts.fit ?? styled.fit, look: LOOKS[lookKey].look,
+    music: styled.music,
+    output: { preset: styled.preset, resolution: 'auto', fps: 'auto', audio: 'keep', speed: 'balanced', encoder: 'auto' },
   };
   const projectFile = opts.project ? path.resolve(opts.project) : freeFile(path.join(path.dirname(files[0]), 'montage.ovc.json'));
   fs.writeFileSync(projectFile, JSON.stringify(project, null, 2));

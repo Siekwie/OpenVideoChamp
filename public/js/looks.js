@@ -26,7 +26,8 @@ export const KEEP_COLORS = [
 ];
 
 // The vertical highlight-montage style: 9:16 filled frame, punchy colours, hard cuts, the game audio
-// under the music, exported for TikTok / Shorts / Reels.
+// under the music, exported for TikTok / Shorts / Reels. Used by the UI's style button, POST /api/montage
+// with `style: true` and `ovc montage` (see montageStyled).
 export const MONTAGE_STYLE = {
   aspect: '9:16',
   fit: 'fill',
@@ -37,3 +38,20 @@ export const MONTAGE_STYLE = {
   preset: 'tiktok',
   montage: { setup: [5, 2.5], hold: 0.8, sync: 'beat' },
 };
+
+// The montage style applied to a sequence: the fields to set. Clips at full volume get the game-audio
+// level; the music keeps its track and start. `isImage(clip)` tells stills (no audio) apart.
+export function montageStyled({ clips = [], music = null, fadeOut = 0, isImage = () => false }) {
+  const s = MONTAGE_STYLE;
+  return {
+    aspect: s.aspect,
+    fit: s.fit,
+    look: structuredClone(s.look),
+    clips: clips.map((c) => (!isImage(c) && (c.volume == null || c.volume === 1) ? { ...c, volume: s.clipVolume } : c)),
+    transitions: clips.slice(1).map(() => ({ type: 'cut', duration: 0 })),
+    music: music ? { ...music, ...s.music, start: music.start ?? 0 } : null,
+    normalize: Boolean(music),
+    fadeOut: fadeOut || s.fadeOut,
+    preset: s.preset,
+  };
+}
