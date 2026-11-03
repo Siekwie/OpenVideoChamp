@@ -54,9 +54,9 @@ const fontName = (value, name) => {
 // Caption looks. Sizes are fractions of the canvas height so a 480p draft looks like the 1080p export.
 export const CAPTION_PRESETS = {
   // Big uppercase words with a thick outline, the word being spoken in yellow: the talking-head short look.
-  bold: { words: 3, maxChars: 18, uppercase: true, size: 0.05, color: '#ffffff', highlight: '#ffd21f', outline: 0.0045, background: null, y: 0.68, font: null },
+  bold: { words: 3, maxChars: 18, uppercase: true, punctuation: false, size: 0.05, color: '#ffffff', highlight: '#ffd21f', outline: 0.0045, background: null, y: 0.68, font: null },
   // Sentence case on a dark box, no highlight: calmer, for explainers and long quotes.
-  clean: { words: 7, maxChars: 34, uppercase: false, size: 0.034, color: '#ffffff', highlight: null, outline: 0.006, background: '#000000', y: 0.74, font: null },
+  clean: { words: 7, maxChars: 34, uppercase: false, punctuation: true, size: 0.034, color: '#ffffff', highlight: null, outline: 0.006, background: '#000000', y: 0.74, font: null },
 };
 
 export function normalizeCaptionStyle(input) {
@@ -70,6 +70,7 @@ export function normalizeCaptionStyle(input) {
     words: Math.round(num(o.words, 'captionStyle words', { min: 1, max: 12, fallback: p.words })),
     maxChars: Math.round(num(o.maxChars, 'captionStyle maxChars', { min: 4, max: 80, fallback: p.maxChars })),
     uppercase: o.uppercase == null ? p.uppercase : Boolean(o.uppercase),
+    punctuation: o.punctuation == null ? p.punctuation : Boolean(o.punctuation),
     size: num(o.size, 'captionStyle size', { min: 0.01, max: 0.2, fallback: p.size }),
     color: colour(o.color, 'captionStyle color', p.color) ?? p.color,
     highlight: colour(o.highlight, 'captionStyle highlight', p.highlight),
@@ -197,7 +198,11 @@ export function buildAss({ width: W, height: H, duration, captions = [], texts =
   for (const { offset, words } of captions) {
     const pos = `\\pos(${x},${Math.round(capStyle.y * H)})`;
     for (const g of groupWords(words, capStyle)) {
-      const shown = g.words.map((w) => assText(capStyle.uppercase ? w.text.toUpperCase() : w.text));
+      // Without punctuation, trailing commas and full stops go ("IT," -> "IT"); ? and ! stay.
+      const shown = g.words.map((w) => {
+        const t = capStyle.punctuation === false ? w.text.replace(/[,.;:]+(?=["')\]]*$)/, '') : w.text;
+        return assText(capStyle.uppercase ? t.toUpperCase() : t);
+      });
       const at = (t) => Math.min(duration, offset + t);
       if (!capStyle.highlight) {
         events.push(`Dialogue: 1,${assTime(at(g.start))},${assTime(at(g.end))},cap,,0,0,0,,{${pos}}${shown.join(' ')}`);

@@ -78,6 +78,12 @@ test('buildAss: canvas-sized script, a highlighted event per word, texts with a 
   assert.match(ass, /Style: text0,Arial Black,69,&H00000000,&H00000000,&H20FFFFFF,&H20FFFFFF,-1,0,0,0,100,100,0,0,3,/);
   assert.match(ass, /Dialogue: 2,0:00:00\.00,0:00:03\.00,text0,,0,0,0,,\{\\pos\(540,269\)\}The hook/);
   assert.equal(buildAss({ width: 10, height: 10, duration: 1, captions: [], texts: [] }), null);
+  // the bold style drops trailing commas and full stops, keeps question marks
+  const punct = buildAss({ width: 1080, height: 1920, duration: 5, style: { ...CAPTION_PRESETS.bold, highlight: null },
+    captions: [{ offset: 0, words: [{ t: 0, end: 0.3, text: 'well,' }, { t: 0.3, end: 0.6, text: 'really?' }, { t: 0.6, end: 0.9, text: 'yes.' }] }] });
+  assert.match(punct, /WELL REALLY\?/);
+  assert.match(punct, /\}YES$/m);
+  assert.match(buildAss({ width: 1080, height: 1920, duration: 5, style: CAPTION_PRESETS.clean, captions: [{ offset: 0, words: [{ t: 0, end: 0.3, text: 'well,' }] }] }), /well,$/m);
 });
 
 test('filterPath: Windows paths survive the filter graph parser', () => {

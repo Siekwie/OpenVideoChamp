@@ -297,6 +297,7 @@ request with captions or texts is a 400.
   | `words` | 3 | 7 | words on screen at once (1..12) |
   | `maxChars` | 18 | 34 | characters on screen at once (4..80) |
   | `uppercase` | true | false | |
+  | `punctuation` | false | true | keep trailing `,` `.` `;` `:` (`?` and `!` always stay) |
   | `size` | 0.05 | 0.034 | font size / canvas height (96 px at 1920) |
   | `color` | `#ffffff` | `#ffffff` | text |
   | `highlight` | `#ffd21f` | null | the word being spoken; null = none |
