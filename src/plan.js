@@ -7,6 +7,7 @@
 // (sourceId/start/end) is a one-clip sequence.
 import path from 'node:path';
 import { LOOKS } from '../public/js/looks.js';
+import { normalizeCaptions, normalizeCaptionStyle, normalizeTexts, clipCaptions, buildAss, filterPath } from './captions.js';
 
 const PRESET_MB = { discord: 10, discord50: 50, discord500: 500 };
 // Presets without a size target that cap the canvas at 1080 (short side) and 60 fps, CRF 18.
@@ -178,7 +179,7 @@ function normalizeSounds(input, name) {
 }
 
 // The fields of one clip; the legacy single-range request carries the same ones at the top level.
-const CLIP_KEYS = ['sourceId', 'start', 'end', 'volume', 'mute', 'rate', 'fit', 'zoom', 'pan', 'look', 'keepColor', 'hit', 'flash', 'sounds'];
+const CLIP_KEYS = ['sourceId', 'start', 'end', 'volume', 'mute', 'rate', 'fit', 'zoom', 'pan', 'look', 'keepColor', 'hit', 'flash', 'sounds', 'captions'];
 
 function normalizeClip(input, index) {
   if (!input || typeof input !== 'object') fail(`Clip ${index + 1} must be an object`);
@@ -199,6 +200,7 @@ function normalizeClip(input, index) {
     hit: input.hit == null || input.hit === '' ? null : num(input.hit, `${name} hit`, { min: 0 }),
     flash: num(input.flash === true ? 0.8 : input.flash, `${name} flash`, { min: 0, max: 1, fallback: 0 }),
     sounds: normalizeSounds(input.sounds, `${name} sound`),
+    captions: normalizeCaptions(input.captions, `${name} caption`),
   };
 }
 
@@ -249,6 +251,8 @@ export function normalizeRequest(input = {}) {
     aspect: input.aspect ?? 'auto',
     fit: input.fit ?? 'fit',
     look: normalizeLook(input.look),
+    captionStyle: normalizeCaptionStyle(input.captionStyle),
+    texts: normalizeTexts(input.texts),
     preview: bool(input.preview),
     preset: input.preset ?? 'cut',
     targetMB: input.targetMB == null ? null : Number(input.targetMB),
@@ -329,6 +333,7 @@ export function resolveSequence(req, getSource, { transitions: available = ALL_T
       source, start, end, duration, srcDuration, rate, volume: c.volume, mute: c.mute, image, audible,
       fit: c.fit ?? req.fit, zoom: c.zoom, pan: c.pan.map((k) => ({ ...k, t: local(k.t) })),
       look: c.look, keepColor, hitAt, flash: hitAt == null ? 0 : c.flash, sounds,
+      captions: clipCaptions(c.captions, { start, rate, duration }),
     };
   });
 
@@ -356,7 +361,19 @@ export function resolveSequence(req, getSource, { transitions: available = ALL_T
     if (req.music.fadeIn + req.music.fadeOut > total + EPS) fail('Music fades are longer than the video');
     music = { ...req.music, source };
   }
-  return { clips, transitions, total, music, fadeIn: req.fadeIn, fadeOut: req.fadeOut, normalize: req.normalize, look: req.look, notes };
+  for (const t of req.texts) if (t.start >= total) notes.push(`Text "${t.text.slice(0, 30)}" starts after the end of the video and is left out.`);
+  const subtitles = clips.some((c) => c.captions.length) || req.texts.some((t) => t.start < total);
+  return {
+    clips, transitions, total, music, fadeIn: req.fadeIn, fadeOut: req.fadeOut, normalize: req.normalize, look: req.look,
+    captionStyle: req.captionStyle, texts: req.texts, subtitles, notes,
+  };
+}
+
+// Where each clip starts on the output timeline, in frames.
+function clipStarts(tl) {
+  const starts = [0];
+  for (let k = 1; k < tl.frames.length; k++) starts.push(starts[k - 1] + tl.frames[k - 1] - tl.overlap[k - 1]);
+  return starts;
 }
 
 // The sequence in whole output frames. Every clip and transition is rounded to frames once, here, and
@@ -394,7 +411,7 @@ const fmtKbps = (k) => (k >= 1000 ? `${(k / 1000).toFixed(2)} Mbps` : `${k} kbps
 function copyEligible(req, seq) {
   const [c] = seq.clips;
   const untouched = c.volume === 1 && c.rate === 1 && c.zoom === 1 && !c.look && !c.keepColor && !c.flash && !c.sounds.length;
-  return seq.clips.length === 1 && !c.image && untouched && !seq.music && !seq.fadeIn && !seq.fadeOut
+  return seq.clips.length === 1 && !c.image && untouched && !seq.music && !seq.fadeIn && !seq.fadeOut && !seq.subtitles
     && !seq.normalize && !seq.look && req.aspect === 'auto' && !req.preview && req.preset === 'cut' && req.cut === 'fast';
 }
 
@@ -425,11 +442,14 @@ function referenceSource(seq) {
   };
 }
 
-export function planExport(sources, input, { encoders = ['libx264'], transitions = ALL_TRANSITIONS, defaultOutputDir = '.', previewDir = null, exists = () => false, keyframes = [] } = {}) {
+// Legacy call style: a single Source object.
+const sourceLookup = (sources) => (sources && typeof sources === 'object' && typeof sources.id === 'string' ? (id) => (id === sources.id ? sources : null) : sources);
+
+export function planExport(sources, input, { encoders = ['libx264'], transitions = ALL_TRANSITIONS, subtitles = true, defaultOutputDir = '.', previewDir = null, exists = () => false, keyframes = [] } = {}) {
   const req = normalizeRequest(input);
-  // Legacy call style: a single Source object.
-  const getSource = sources && typeof sources === 'object' && typeof sources.id === 'string' ? (id) => (id === sources.id ? sources : null) : sources;
+  const getSource = sourceLookup(sources);
   const seq = resolveSequence(req, getSource, { transitions });
+  if (seq.subtitles && !subtitles) fail('This ffmpeg build cannot draw captions or texts (it has no libass "ass" filter)');
   const first = seq.clips[0].source;
   const duration = seq.total;
   const ref = referenceSource(seq);
@@ -446,6 +466,7 @@ export function planExport(sources, input, { encoders = ['libx264'], transitions
     width: ref.width, height: ref.height, fps: ref.fps,
     duration, clips: seq.clips.length, transitions: seq.transitions.filter((t) => t.type !== 'cut').length,
     music: Boolean(seq.music), preview: req.preview,
+    captions: seq.clips.reduce((n, c) => n + c.captions.length, 0), texts: seq.texts.filter((t) => t.start < duration).length,
     aspect: req.aspect !== 'auto' ? req.aspect : req.preset === 'tiktok' ? '9:16' : 'auto',
     targetBytes, estimatedBytes: null, outputPath: null, warnings, summary: '',
   };
@@ -661,7 +682,7 @@ const AFORMAT = `aresample=${AUDIO_RATE}:async=1,aformat=sample_fmts=fltp:channe
 // filter_complex for the sequence. `withAudio=false` builds the video-only graph for two-pass pass 1.
 // Returns { graph, video, audio, duration }: the graph, its output labels and its exact length in seconds.
 // Inputs: one per clip, then the music (when there is one), then every clip sound in clip order.
-export function buildFilterGraph(plan, seq, { withAudio = true } = {}) {
+export function buildFilterGraph(plan, seq, { withAudio = true, subtitlesFile = 'captions.ass', fontsDir = null } = {}) {
   const { width: W, height: H, fps: F } = plan;
   const tl = timeline(seq, F);
   const T = tl.duration;
@@ -710,12 +731,11 @@ export function buildFilterGraph(plan, seq, { withAudio = true } = {}) {
   });
 
   // Chain the clips: a cut is a concat, anything else an xfade/acrossfade at the running offset.
-  // `starts` collects where each clip begins on the output timeline (in frames), for the clip sounds.
+  // `starts`: where each clip begins on the output timeline (in frames), for the clip sounds.
   let v = vLabels[0], a = aLabels[0], acc = tl.frames[0];
-  const starts = [0];
+  const starts = clipStarts(tl);
   seq.transitions.forEach((t, i) => {
     const k = i + 1, o = tl.overlap[i];
-    starts.push(acc - o);
     if (!o) {
       parts.push(`${v}${vLabels[k]}concat=n=2:v=1:a=0[x${k}]`);
       if (clipAudio) parts.push(`${a}${aLabels[k]}concat=n=2:v=0:a=1[y${k}]`);
@@ -729,6 +749,8 @@ export function buildFilterGraph(plan, seq, { withAudio = true } = {}) {
   });
 
   const vTail = [];
+  // Captions and texts (an ASS file, see buildSubtitles) go on the finished picture, under the fades.
+  if (seq.subtitles) vTail.push(`ass=filename=${filterPath(subtitlesFile)}${fontsDir ? `:fontsdir=${filterPath(fontsDir)}` : ''}`);
   if (seq.fadeIn > 0) vTail.push(`fade=t=in:d=${f3(seq.fadeIn)}`);
   if (seq.fadeOut > 0) vTail.push(`fade=t=out:st=${fadeOutAt(seq.fadeOut)}:d=${f3(seq.fadeOut)}`);
   if (vTail.length) { parts.push(`${v}${vTail.join(',')}[vout]`); v = '[vout]'; }
@@ -767,11 +789,24 @@ export function buildFilterGraph(plan, seq, { withAudio = true } = {}) {
   return { graph: parts.join(';'), video: v, audio: a, duration: T };
 }
 
+// The ASS subtitle file for a plan's captions and texts (null when it has none). The export writes it
+// next to its pass logs and hands its path to buildArgs as `subtitlesFile`.
+export function buildSubtitles(plan, sources, input, { transitions = ALL_TRANSITIONS, font = 'Arial' } = {}) {
+  const seq = resolveSequence(normalizeRequest(input), sourceLookup(sources), { transitions });
+  if (!seq.subtitles || plan.mode === 'copy') return null;
+  const tl = timeline(seq, plan.fps);
+  const starts = clipStarts(tl);
+  return buildAss({
+    width: plan.width, height: plan.height, duration: tl.duration, style: seq.captionStyle, texts: seq.texts, font,
+    captions: seq.clips.map((c, k) => ({ offset: starts[k] / plan.fps, words: c.captions })).filter((c) => c.words.length),
+  });
+}
+
 // Returns one ffmpeg argv array per pass.
-export function buildArgs(plan, sources, input, { passLogFile, nullDevice, transitions = ALL_TRANSITIONS } = {}) {
+export function buildArgs(plan, sources, input, { passLogFile, nullDevice, transitions = ALL_TRANSITIONS, subtitlesFile, fontsDir } = {}) {
   const req = normalizeRequest(input);
-  const getSource = sources && typeof sources === 'object' && typeof sources.id === 'string' ? (id) => (id === sources.id ? sources : null) : sources;
-  const seq = resolveSequence(req, getSource, { transitions });
+  const seq = resolveSequence(req, sourceLookup(sources), { transitions });
+  const subs = { subtitlesFile, fontsDir };
   const head = ['-y', '-hide_banner', '-nostdin', '-loglevel', 'error', '-nostats', '-progress', 'pipe:1'];
   const faststart = plan.outputPath.toLowerCase().endsWith('.mkv') ? [] : ['-movflags', '+faststart'];
   const audio = plan.audioKbps ? ['-c:a', 'aac', '-b:a', `${plan.audioKbps}k`, '-ar', String(AUDIO_RATE)] : ['-an'];
@@ -797,7 +832,7 @@ export function buildArgs(plan, sources, input, { passLogFile, nullDevice, trans
   }
   if (plan.audioKbps) for (const c of seq.clips) for (const s of c.sounds) musicInput.push('-i', s.source.path);
   const withAudio = plan.audioKbps > 0;
-  const full = buildFilterGraph(plan, seq, { withAudio });
+  const full = buildFilterGraph(plan, seq, { withAudio, ...subs });
   const mapsFor = (g, useAudio) => ['-filter_complex', g.graph, '-map', g.video, ...(useAudio && g.audio ? ['-map', g.audio] : [])];
   const common = ['-t', f6(full.duration)];
   const x264 = plan.encoder === 'libx264' ? ['-preset', req.preview ? 'ultrafast' : X264_PRESET[req.speed]] : [];
@@ -815,7 +850,7 @@ export function buildArgs(plan, sources, input, { passLogFile, nullDevice, trans
 
   const passlog = passLogFile ?? `${plan.outputPath}.passlog`;
   const nul = nullDevice ?? (process.platform === 'win32' ? 'NUL' : '/dev/null');
-  const videoOnly = buildFilterGraph(plan, seq, { withAudio: false });
+  const videoOnly = buildFilterGraph(plan, seq, { withAudio: false, ...subs });
   return [
     [...head, ...inputs, ...mapsFor(videoOnly, false), ...common, ...video, ...rate, ...pix, '-pass', '1', '-passlogfile', passlog, '-an', '-f', 'null', nul],
     [...head, ...inputs, ...musicInput, ...mapsFor(full, withAudio), ...common, ...video, ...rate, ...pix, '-pass', '2', '-passlogfile', passlog, ...(withAudio ? audio : ['-an']), ...faststart, plan.outputPath],

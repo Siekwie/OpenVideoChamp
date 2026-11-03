@@ -274,7 +274,7 @@ test('normalizeRequest: legacy request becomes a one-clip sequence; transitions 
   const r = normalizeRequest(req({ start: 1, end: 2 }));
   assert.deepEqual(r.clips, [{
     sourceId: 's_1', start: 1, end: 2, volume: 1, mute: false,
-    rate: 1, fit: null, zoom: 1, pan: [], look: null, keepColor: null, hit: null, flash: 0, sounds: [],
+    rate: 1, fit: null, zoom: 1, pan: [], look: null, keepColor: null, hit: null, flash: 0, sounds: [], captions: [],
   }]);
   assert.equal(r.aspect, 'auto');
   assert.equal(r.fit, 'fit');

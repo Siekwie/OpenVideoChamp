@@ -153,7 +153,7 @@ async function finish(ffmpeg, plan, sources, request) {
 async function capabilities(ffmpeg, { encoders = false } = {}) {
   const caps = detectCapabilities(ffmpeg);
   if (encoders) await caps.ready;
-  else await caps.transitionsReady;
+  else await Promise.all([caps.transitionsReady, caps.subtitlesReady]);
   return caps;
 }
 
@@ -217,7 +217,7 @@ async function render(positional, opts) {
   const request = projectRequest(project, outputOptions(opts, { preset: 'steam', ...project.output }));
   const getSource = (id) => sources.get(id) || null;
   const plan = planExport(getSource, request, {
-    encoders: caps.encoders.length ? caps.encoders : ['libx264'], transitions: caps.transitions,
+    encoders: caps.encoders.length ? caps.encoders : ['libx264'], transitions: caps.transitions, subtitles: caps.subtitles,
     defaultOutputDir: DEFAULT_OUTPUT_DIR, exists: fs.existsSync,
   });
   console.error(`${data.name || path.basename(abs)}: ${plan.clips} clip${plan.clips === 1 ? '' : 's'}, ${plan.transitions} transition${plan.transitions === 1 ? '' : 's'}${plan.music ? ', music' : ''}, ${plan.duration.toFixed(1)} s`);

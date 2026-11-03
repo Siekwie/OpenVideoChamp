@@ -169,12 +169,17 @@ async function listTransitions(ffmpeg) {
 // Starts detection in the background; read `state.encoders` / `state.transitions` at any time,
 // await `state.ready` for the final lists.
 export function detectCapabilities(ffmpeg) {
-  const state = { encoders: [], transitions: ALL_TRANSITIONS, ready: null, transitionsReady: null };
+  const state = { encoders: [], transitions: ALL_TRANSITIONS, subtitles: true, ready: null, transitionsReady: null };
+  // Captions need libass (the "ass" filter); assumed present until the check says otherwise.
+  state.subtitlesReady = run(ffmpeg, ['-hide_banner', '-h', 'filter=ass'])
+    .then(({ stdout }) => { state.subtitles = /Filter ass\b/.test(stdout); return state.subtitles; })
+    .catch(() => { state.subtitles = false; return false; });
   state.transitionsReady = listTransitions(ffmpeg).then((t) => { if (t.length) state.transitions = t; return state.transitions; });
   state.ready = (async () => {
     const [{ stdout }] = await Promise.all([
       run(ffmpeg, ['-hide_banner', '-encoders']).catch(() => ({ stdout: '' })),
       state.transitionsReady,
+      state.subtitlesReady,
     ]);
     const listed = ENCODER_CANDIDATES.filter((name) => new RegExp(`^\\s*V\\S*\\s+${name}\\s`, 'm').test(stdout));
     if (listed.includes('libx264')) state.encoders = ['libx264']; // assumed until verified

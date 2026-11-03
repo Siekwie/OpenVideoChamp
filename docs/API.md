@@ -41,6 +41,17 @@ on the beat of a song), start to finish:
    (`ovc montage <clips> --music <song> --render` does all of this from the
    command line and writes such a project.)
 
+A talking-head short (an interview or podcast moment with burned-in captions), start to finish:
+
+1. `POST /api/open` for the long recording.
+2. Transcribe it with word timestamps (any speech-to-text that gives words with
+   start/end seconds, e.g. faster-whisper or the platform's own captions).
+3. `POST /api/export` with one or more clips of it (`fit: "fill"` or `"blur"`,
+   a `pan` that keeps the speaker's face in frame), each carrying the words
+   inside its range as `captions` (source seconds), a `captionStyle`, a hook
+   headline in `texts` for the first seconds, and `preset: "tiktok"`. See
+   "Captions and texts".
+
 The UI keeps its own sequence in the browser, so what a script does through
 the API does not show up in an open UI window. To hand a sequence to the user,
 write it as a project file (see the end) and open
@@ -184,7 +195,8 @@ anything changes to show the estimate line.
       "keepColor": { "color": "#e0501e", "range": 0.3, "softness": 0.1, "from": null, "until": 8.3 },
       "hit": 8.3,               // source time of the payoff (the goal); used by flash, sounds and POST /api/montage
       "flash": 0.8,             // 0..1: a white flash on the hit, fading over 0.35 s (needs `hit`)
-      "sounds": [ { "sourceId": "s_boom", "at": null, "volume": 1 } ]   // sound effects, see below
+      "sounds": [ { "sourceId": "s_boom", "at": null, "volume": 1 } ],   // sound effects, see below
+      "captions": [ { "t": 3.52, "end": 3.80, "text": "Nobody" }, { "t": 3.80, "end": 4.10, "text": "expected" } ]   // burned-in words, see "Captions and texts"
     }
   ],
   "transitions": [                             // clips.length - 1 entries; missing ones are cuts
@@ -207,6 +219,10 @@ anything changes to show the estimate line.
   "aspect": "auto",         // canvas shape: "auto" (follow the clips) | "16:9" | "9:16" | "1:1" | "4:5"
   "fit": "fit",             // how clips fill the canvas unless they say otherwise: "fit" | "fill" | "blur"
   "look": null,             // colour grade of the whole video (every clip): an object or a preset name, see "Looks"
+  "captionStyle": "bold",   // how clip captions look: "bold" | "clean" | an object, see "Captions and texts"
+  "texts": [                // text on the whole video in output seconds (a hook headline, a credit)
+    { "text": "Why Nvidia's CEO isn't worried", "start": 0, "end": 3.5, "y": 0.14, "background": "#ffffff" }
+  ],
 
   "preset": "discord",      // "cut" | "discord" | "discord50" | "discord500" | "steam" | "tiktok" | "custom"
   "targetMB": 10,           // only for "custom" (decimal MB, 1 MB = 1,000,000 bytes)
@@ -255,6 +271,50 @@ at source time `at` of the clip, by default the clip's `hit`, or its start
 without one. They move with the clip, are mixed over everything else (clip
 audio, music; also in "music only" mode) and cut off at the end of the video.
 A sound placed outside the trimmed clip is left out with a warning.
+
+**Captions and texts.** Both are drawn by libass on the finished picture
+(after the clips are joined, under the fades), from an ASS subtitle file the
+export writes next to its pass logs; a draft preview shows them too.
+`GET /api/info` says whether this ffmpeg can (`captions`); without libass a
+request with captions or texts is a 400.
+
+- `captions` (per clip, up to 5000): words or phrases of a transcript,
+  `{ "t", "end", "text" }` in **source** seconds (`end` defaults to the next
+  entry's `t`). They move with the clip: trimmed away with it, faster with its
+  `rate`, placed wherever the clip lands in the video. Entries outside the clip
+  are dropped. A phrase entry is split into words sharing its time. Words are
+  grouped into what is on screen together: at most `words` words and `maxChars`
+  characters, a new group after a sentence ends (`.`, `!`, `?`) or a pause of
+  more than 0.6 s; a group stays up until the next starts when the gap is short,
+  so nothing flickers. With a `highlight` colour the word being spoken is drawn
+  in it (one subtitle event per word).
+- `captionStyle`: a preset name or an object (a `preset` plus overrides).
+  Sizes and positions are fractions of the canvas height, so a 480p draft looks
+  like the 1080p export.
+
+  | key | `bold` (default) | `clean` | |
+  |---|---|---|---|
+  | `words` | 3 | 7 | words on screen at once (1..12) |
+  | `maxChars` | 18 | 34 | characters on screen at once (4..80) |
+  | `uppercase` | true | false | |
+  | `size` | 0.05 | 0.034 | font size / canvas height (96 px at 1920) |
+  | `color` | `#ffffff` | `#ffffff` | text |
+  | `highlight` | `#ffd21f` | null | the word being spoken; null = none |
+  | `outline` | 0.0045 | 0.006 | outline width / canvas height (box padding with a background) |
+  | `background` | null | `#000000` | a box behind the text instead of an outline |
+  | `y` | 0.68 | 0.74 | vertical centre of the text, 0 = top, 1 = bottom |
+  | `font` | null | null | a font family; null = a heavy sans this machine has (Arial Black, else Arial / DejaVu Sans) |
+
+- `texts` (up to 20): `{ "text", "start", "end", "y", "size", "color",
+  "background", "outline", "uppercase", "font" }`, in **output** seconds
+  (`end` null = to the end of the video). Defaults: `y` 0.14, `size` 0.036,
+  white with an outline, or black on a box when `background` is set. Long text
+  wraps inside 7 % side margins. The typical hook: `{ "text": "…", "end": 3,
+  "background": "#ffffff" }`.
+
+Captions and texts rule out a stream copy (they always re-encode). Text is
+plain: `{` `}` become brackets, control characters spaces, at most 300
+characters per entry.
 
 Preset targets (decimal, deliberately under the service limits):
 `discord` 10 MB, `discord50` 50 MB, `discord500` 500 MB. `steam` = no size
@@ -372,7 +432,9 @@ timeline, so a beat-synced montage stays on the beat.
   "transitions": ["fade", "wipeleft", "fadeblack", "..."],   // xfade transitions this ffmpeg supports
   "dialog": true,                          // native file dialog available
   "defaultOutputDir": "C:\\Users\\me\\Videos\\OpenVideoChamp",
-  "looks": { "none": null, "punchy": { "contrast": 1.12, "saturation": 1.35, "sharpen": 0.35 }, "...": {} }   // look presets by name
+  "looks": { "none": null, "punchy": { "contrast": 1.12, "saturation": 1.35, "sharpen": 0.35 }, "...": {} },   // look presets by name
+  "captions": true,                        // this ffmpeg has libass: captions and texts can be drawn
+  "captionStyles": { "bold": { ... }, "clean": { ... } }   // caption presets with their values
 }
 ```
 ### `GET /api/docs`  — this document, as text/markdown (what the "copy agent instructions" button copies)
@@ -481,10 +543,11 @@ headlessly, `POST /api/project` opens for a script and `/?project=<path>` (or
   "fadeIn": 0.5, "fadeOut": 1, "normalize": true,
   "aspect": "9:16", "fit": "fill", "look": { "contrast": 1.12, "saturation": 1.35, "sharpen": 0.35 },
   "music": { "sourceId": "s_2", "start": 0, "volume": 0.5, "fadeIn": 1, "fadeOut": 2, "loop": true, "mode": "mix" },
+  "captionStyle": "bold", "texts": [],
   "output": { "preset": "steam", "targetMB": 10, "cut": "fast", "resolution": "auto", "fps": "auto", "audio": "keep", "speed": "balanced", "encoder": "auto" }
 }
 ```
 The `clips`, `transitions`, `fadeIn`, `fadeOut`, `music`, `normalize`,
-`aspect`, `fit`, `look` and `output` fields are exactly the ExportRequest
+`aspect`, `fit`, `look`, `captionStyle`, `texts` and `output` fields are exactly the ExportRequest
 fields; the ids only have to be consistent inside the file (clip `sounds` refer
 to sources too, and are dropped when their file is missing).

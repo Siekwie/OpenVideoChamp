@@ -50,6 +50,8 @@ export async function resolveProject(data, { baseDir = process.cwd(), open }) {
     aspect: typeof data.aspect === 'string' ? data.aspect : 'auto',
     fit: typeof data.fit === 'string' ? data.fit : 'fit',
     look: data.look && typeof data.look === 'object' ? data.look : null,
+    captionStyle: data.captionStyle ?? null,
+    texts: Array.isArray(data.texts) ? data.texts : [],
     music: musicSource?.hasAudio ? { ...data.music, sourceId: musicSource.id } : null,
     output, missing, dropped,
   };
@@ -57,6 +59,6 @@ export async function resolveProject(data, { baseDir = process.cwd(), open }) {
 
 // The ExportRequest a resolved project describes; `overrides` win over the project's output options.
 export function projectRequest(project, overrides = {}) {
-  const { clips, transitions, fadeIn, fadeOut, music, normalize, aspect, fit, look, output } = project;
-  return { clips, transitions, fadeIn, fadeOut, music, normalize, aspect, fit, look, ...output, ...overrides };
+  const { clips, transitions, fadeIn, fadeOut, music, normalize, aspect, fit, look, captionStyle, texts, output } = project;
+  return { clips, transitions, fadeIn, fadeOut, music, normalize, aspect, fit, look, captionStyle, texts, ...output, ...overrides };
 }

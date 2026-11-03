@@ -4,7 +4,8 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { randomBytes } from 'node:crypto';
-import { buildArgs } from './plan.js';
+import { buildArgs, buildSubtitles } from './plan.js';
+import { defaultCaptionFont } from './captions.js';
 
 const TERMINAL = new Set(['done', 'error', 'cancelled']);
 const EMIT_INTERVAL = 200;
@@ -28,10 +29,20 @@ export class Jobs extends EventEmitter {
     // failed or cancelled job can never clobber or delete a file it did not fully produce.
     const ext = path.extname(plan.outputPath);
     const tempPath = plan.outputPath.slice(0, -ext.length) + '.part' + ext;
+    const transitions = this.capabilities?.transitions;
+    // Captions and texts are an ASS file next to the pass logs (removed with them when the job ends).
+    const font = (this.font ??= defaultCaptionFont());
+    const subs = buildSubtitles(plan, sources, request, { transitions, font: font.family });
+    let subtitlesFile;
+    if (subs) {
+      subtitlesFile = path.join(this.tmpDir, `pass-${id}.ass`);
+      fs.mkdirSync(this.tmpDir, { recursive: true });
+      fs.writeFileSync(subtitlesFile, subs);
+    }
     const job = {
       id, status: 'queued', pass: 0, passes: plan.twoPass ? 2 : 1, progress: 0, fps: null, speed: null,
       etaSeconds: null, plan, outputPath: plan.outputPath, tempPath, outputBytes: null, error: null, log: [],
-      args: buildArgs({ ...plan, outputPath: tempPath }, sources, request, { passLogFile: path.join(this.tmpDir, `pass-${id}`), transitions: this.capabilities?.transitions }),
+      args: buildArgs({ ...plan, outputPath: tempPath }, sources, request, { passLogFile: path.join(this.tmpDir, `pass-${id}`), transitions, subtitlesFile, fontsDir: font.dir }),
       passProgress: 0, proc: null, cancelled: false, startedAt: 0, lastEmit: 0, timer: null,
     };
     job.finished = new Promise((resolve) => { job.resolveFinished = resolve; });

@@ -8,6 +8,7 @@ import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 import { probe, keyframes as probeKeyframes, version as ffmpegVersion } from './ffmpeg.js';
 import { planExport, ALL_TRANSITIONS } from './plan.js';
+import { CAPTION_PRESETS } from './captions.js';
 import { Jobs, isTerminal } from './jobs.js';
 import { dialogAvailable, openFileDialog, reveal } from './dialog.js';
 import { resolveProject } from './project.js';
@@ -201,6 +202,7 @@ export function createServer({ ffmpeg, ffprobe, capabilities, tmpDir, publicDir 
     const opts = {
       encoders: caps.encoders,
       transitions: caps.transitions,
+      subtitles: caps.subtitles !== false,
       defaultOutputDir: outputDir,
       previewDir,
       exists: (p) => fs.existsSync(p) || jobs.reserved(p),
@@ -224,6 +226,7 @@ export function createServer({ ffmpeg, ffprobe, capabilities, tmpDir, publicDir 
         ffmpeg: { path: ffmpeg, version: await versionPromise },
         encoders: caps.encoders, transitions: caps.transitions, dialog: dialogAvailable(), defaultOutputDir: outputDir,
         looks: Object.fromEntries(Object.entries(LOOKS).map(([name, l]) => [name, l.look])),
+        captions: caps.subtitles !== false, captionStyles: CAPTION_PRESETS,
       };
     }],
     ['GET', /^\/api\/docs$/, (req, res) => sendFile(res, path.join(ROOT, 'docs', 'API.md'), 'text/markdown; charset=utf-8')],

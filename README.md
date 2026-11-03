@@ -31,6 +31,10 @@ What it does:
 - **Transitions**: crossfade, dip to black/white, wipes, slides, shapes and
   effects between clips (everything ffmpeg's `xfade` offers), with a duration
   that is clamped to what fits.
+- **Captions**: burned-in, word-timed captions from a transcript (big bold words
+  with the spoken one highlighted, or sentences on a box) and text overlays such
+  as a hook headline, for talking-head shorts. API and project files for now
+  (see "Captions and texts" in [docs/API.md](docs/API.md)).
 - **Audio**: per-clip volume and mute, fade in/out of the whole video, a music
   track laid under the clips (or replacing their audio) with its own volume,
   start offset, fades and looping, and optional loudness normalisation to
